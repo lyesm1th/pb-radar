@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.spec
+*.db
+*.sqlite3
+*.osm.pbf
+*.partial
+.DS_Store
+
