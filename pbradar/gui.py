@@ -57,7 +57,7 @@ def dark_theme_logo() -> Image.Image:
 
 
 class App(ctk.CTk):
-    DEFAULT_PANE_RATIOS = (0.35, 0.53)
+    DEFAULT_FILTER_PANE_RATIO = 0.38
 
     def __init__(self):
         ctk.set_appearance_mode("dark")
@@ -99,7 +99,9 @@ class App(ctk.CTk):
             saved_widths = read_column_widths(con)
             ownership_mode = read_setting(con, "ownership_filter", OWNERSHIP_FILTERS[0])
             source_enabled = read_setting(con, "show_prozorro", "1") != "0"
-            self.saved_pane_ratios = read_setting(con, "pane_ratios", "")
+            # The old three-pane layout could leave a huge, empty status pane.
+            # Start from a clean two-pane setting rather than reusing that data.
+            self.saved_filter_ratio = read_setting(con, "filter_pane_ratio_v2", "")
         self.ownership_mode = tk.StringVar(value=ownership_mode if ownership_mode in OWNERSHIP_FILTERS
                                            else OWNERSHIP_FILTERS[0])
         self.show_prozorro = tk.BooleanVar(value=source_enabled)
@@ -137,11 +139,11 @@ class App(ctk.CTk):
         ctk.CTkLabel(top, text=f"Версія {__version__}", text_color=MUTED,
                      font=(FONT, 11)).pack(side="right")
 
-        # Three independently resizable vertical sections. Sashes are stored as
-        # ratios in the existing contacts DB so screen-size changes are safe.
+        # Only the filters and contact area resize. The action/status section
+        # has a natural, fixed height, so it cannot consume the whole window.
         self.layout = tk.PanedWindow(self, orient="vertical", bg="#20344e", bd=0,
-                                     sashwidth=7, sashpad=3, sashrelief="flat",
-                                     showhandle=True, handlesize=17, handlepad=1,
+                                     sashwidth=6, sashpad=0, sashrelief="flat",
+                                     showhandle=False,
                                      opaqueresize=True)
         self.layout.pack(fill="both", expand=True, padx=26, pady=(0, 18))
 
@@ -150,9 +152,12 @@ class App(ctk.CTk):
         filters.grid_rowconfigure(0, weight=1)
         self.cat_vars = self._filter_panel(filters, 0, "НАПРЯМКИ РОБОТИ", CATEGORIES)
         self.reg_vars = self._filter_panel(filters, 1, "ГЕОГРАФІЯ ПОШУКУ", REGIONS)
-        self.layout.add(filters, height=260, minsize=145, stretch="never")
+        self.layout.add(filters, height=280, minsize=195, stretch="never")
 
-        controls = ctk.CTkFrame(self.layout, fg_color=BG)
+        bottom = ctk.CTkFrame(self.layout, fg_color=BG)
+        self.layout.add(bottom, minsize=375, stretch="always")
+        controls = ctk.CTkFrame(bottom, fg_color=BG)
+        controls.pack(fill="x")
         toolbar = ctk.CTkFrame(controls, fg_color="transparent")
         toolbar.pack(fill="x", pady=(7, 9))
         self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT)
@@ -165,7 +170,7 @@ class App(ctk.CTk):
         self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, PANEL_RAISED, side="right")
 
         status = ctk.CTkFrame(controls, fg_color=PANEL, corner_radius=12, height=62)
-        status.pack(fill="both", expand=True, pady=(0, 7))
+        status.pack(fill="x", pady=(0, 9))
         status.pack_propagate(False)
         self.status_text = tk.StringVar(value="Готово. Завантажте OSM усієї України для першого пошуку.")
         ctk.CTkLabel(status, textvariable=self.status_text, text_color=TEXT,
@@ -176,10 +181,8 @@ class App(ctk.CTk):
         self.progress.set(0)
         self.osm_detail = ctk.CTkLabel(status, text="", text_color=MUTED, font=(FONT, 10), anchor="w")
         self.osm_detail.pack(fill="x", padx=15, pady=(3, 0))
-        self.layout.add(controls, height=130, minsize=115, stretch="never")
-
-        panel = ctk.CTkFrame(self.layout, fg_color=PANEL, corner_radius=15)
-        self.layout.add(panel, minsize=200, stretch="always")
+        panel = ctk.CTkFrame(bottom, fg_color=PANEL, corner_radius=15)
+        panel.pack(fill="both", expand=True)
         line = ctk.CTkFrame(panel, fg_color="transparent")
         line.pack(fill="x", padx=16, pady=(13, 10))
         self.count_text = tk.StringVar(value="Контактів: 0")
@@ -373,52 +376,49 @@ class App(ctk.CTk):
             self.table.column(col, width=width)
         self.persist_column_widths()
 
-    def apply_pane_ratios(self, ratios):
+    def apply_filter_pane_ratio(self, ratio):
         height = self.layout.winfo_height()
-        if height < 450:
+        if height < 580:
             return False
-        first = max(145, min(int(height * ratios[0]), height - 335))
-        second = max(first + 125, min(int(height * ratios[1]), height - 210))
+        first = max(195, min(int(height * ratio), height - 385))
         self.layout.sash_place(0, 0, first)
-        self.layout.sash_place(1, 0, second)
         return True
 
     def restore_layout(self):
         try:
-            ratios = json.loads(self.saved_pane_ratios)
-            if (not isinstance(ratios, list) or len(ratios) != 2 or
-                    not 0.15 <= float(ratios[0]) < 0.65 or
-                    not float(ratios[0]) + 0.13 < float(ratios[1]) <= 0.82):
-                raise ValueError("Invalid pane layout")
-            ratios = tuple(float(value) for value in ratios)
+            ratio = float(self.saved_filter_ratio)
+            if not 0.20 <= ratio <= 0.58:
+                raise ValueError("Invalid filter height")
         except (ValueError, TypeError):
-            ratios = self.DEFAULT_PANE_RATIOS
-        if not self.apply_pane_ratios(ratios):
+            ratio = self.DEFAULT_FILTER_PANE_RATIO
+        if not self.apply_filter_pane_ratio(ratio):
             self.after(150, self.restore_layout)
 
     def save_pane_ratios(self, _event=None):
         height = self.layout.winfo_height()
-        if height < 450:
+        if height < 580:
             return
-        ratios = [round(self.layout.sash_coord(i)[1] / height, 4) for i in range(2)]
-        if 0 < ratios[0] < ratios[1] < 1:
-            self.saved_pane_ratios = json.dumps(ratios)
+        ratio = round(self.layout.sash_coord(0)[1] / height, 4)
+        if 0.19 <= ratio <= 0.60:
+            self.saved_filter_ratio = str(ratio)
             with connect_db() as con:
-                write_setting(con, "pane_ratios", self.saved_pane_ratios)
+                write_setting(con, "filter_pane_ratio_v2", self.saved_filter_ratio)
 
     def reset_layout(self):
         """Restore UI sizes, never business filters or locally saved contacts."""
         self.reset_column_widths()
-        self.apply_pane_ratios(self.DEFAULT_PANE_RATIOS)
-        self.saved_pane_ratios = json.dumps(self.DEFAULT_PANE_RATIOS)
+        self.apply_filter_pane_ratio(self.DEFAULT_FILTER_PANE_RATIO)
+        self.saved_filter_ratio = str(self.DEFAULT_FILTER_PANE_RATIO)
         with connect_db() as con:
-            write_setting(con, "pane_ratios", self.saved_pane_ratios)
+            write_setting(con, "filter_pane_ratio_v2", self.saved_filter_ratio)
         self.status_text.set("Розміри панелей і стовпців повернуто до стандартних.")
 
     def show_all_contacts(self):
-        """Reveal existing records without touching the source-search filters."""
+        """Return every display filter AND its visible checkboxes to 'all'."""
         self.list_categories = None
         self.list_regions = None
+        self._set_filters(self.cat_vars, True)
+        self._set_filters(self.reg_vars, True)
         self.ownership_mode.set("Усі")
         self.show_prozorro.set(True)
         self.only_new.set(False)
@@ -482,7 +482,7 @@ class App(ctk.CTk):
                     width=46, height=27, side="right")
         self.button(head, "Очистити", lambda: self._set_filters(variables, False), PANEL_RAISED,
                     width=76, height=27, side="right")
-        box = ctk.CTkScrollableFrame(card, height=174, fg_color="#0d1727", corner_radius=9,
+        box = ctk.CTkScrollableFrame(card, height=125, fg_color="#0d1727", corner_radius=9,
                                       scrollbar_button_color="#29445f")
         box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         box.grid_columnconfigure((0, 1), weight=1)
