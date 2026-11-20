@@ -57,6 +57,8 @@ def dark_theme_logo() -> Image.Image:
 
 
 class App(ctk.CTk):
+    DEFAULT_PANE_RATIOS = (0.35, 0.53)
+
     def __init__(self):
         ctk.set_appearance_mode("dark")
         super().__init__()
@@ -95,6 +97,7 @@ class App(ctk.CTk):
             saved_widths = read_column_widths(con)
             ownership_mode = read_setting(con, "ownership_filter", OWNERSHIP_FILTERS[0])
             source_enabled = read_setting(con, "show_prozorro", "1") != "0"
+            self.saved_pane_ratios = read_setting(con, "pane_ratios", "")
         self.ownership_mode = tk.StringVar(value=ownership_mode if ownership_mode in OWNERSHIP_FILTERS
                                            else OWNERSHIP_FILTERS[0])
         self.show_prozorro = tk.BooleanVar(value=source_enabled)
@@ -120,6 +123,11 @@ class App(ctk.CTk):
                      text_color=TEXT, font=(FONT, 15, "bold")).pack(anchor="w")
         ctk.CTkLabel(heading, text="Вся Україна  ·  OSM + Prozorro  ·  Без CRM", text_color=MUTED,
                      font=(FONT, 11)).pack(anchor="w", pady=(4, 0))
+        self.reset_layout_btn = ctk.CTkButton(
+            top, text="↺", width=35, height=34, corner_radius=10,
+            fg_color=PANEL_RAISED, hover_color="#315174", text_color=TEXT,
+            font=(FONT, 19), command=self.reset_layout)
+        self.reset_layout_btn.pack(side="right", padx=(12, 0))
         self.osm_badge = ctk.CTkLabel(top, text="OSM · перевірка…", text_color=ACCENT,
                                       fg_color=PANEL_RAISED, corner_radius=12, height=34,
                                       font=(FONT, 11, "bold"))
@@ -127,14 +135,24 @@ class App(ctk.CTk):
         ctk.CTkLabel(top, text=f"Версія {__version__}", text_color=MUTED,
                      font=(FONT, 11)).pack(side="right")
 
-        filters = ctk.CTkFrame(self, fg_color="transparent")
-        filters.pack(fill="x", padx=26, pady=(0, 12))
+        # Three independently resizable vertical sections. Sashes are stored as
+        # ratios in the existing contacts DB so screen-size changes are safe.
+        self.layout = tk.PanedWindow(self, orient="vertical", bg="#20344e", bd=0,
+                                     sashwidth=7, sashpad=3, sashrelief="flat",
+                                     showhandle=True, handlesize=17, handlepad=1,
+                                     opaqueresize=True)
+        self.layout.pack(fill="both", expand=True, padx=26, pady=(0, 18))
+
+        filters = ctk.CTkFrame(self.layout, fg_color=BG)
         filters.grid_columnconfigure((0, 1), weight=1, uniform="filters")
+        filters.grid_rowconfigure(0, weight=1)
         self.cat_vars = self._filter_panel(filters, 0, "НАПРЯМКИ РОБОТИ", CATEGORIES)
         self.reg_vars = self._filter_panel(filters, 1, "ГЕОГРАФІЯ ПОШУКУ", REGIONS)
+        self.layout.add(filters, height=260, minsize=145, stretch="never")
 
-        toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.pack(fill="x", padx=26, pady=(0, 9))
+        controls = ctk.CTkFrame(self.layout, fg_color=BG)
+        toolbar = ctk.CTkFrame(controls, fg_color="transparent")
+        toolbar.pack(fill="x", pady=(7, 9))
         self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT)
         self.stop_btn = self.button(toolbar, "■   Зупинити", self.stop_search, PANEL_RAISED)
         self.download_btn = self.button(toolbar, "↓   Завантажити / оновити OSM", self.download_osm, "#24528a")
@@ -144,8 +162,8 @@ class App(ctk.CTk):
         self.export_btn = self.button(toolbar, "Експорт CSV", self.export, PANEL_RAISED, side="right")
         self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, PANEL_RAISED, side="right")
 
-        status = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12, height=62)
-        status.pack(fill="x", padx=26, pady=(0, 12))
+        status = ctk.CTkFrame(controls, fg_color=PANEL, corner_radius=12, height=62)
+        status.pack(fill="both", expand=True, pady=(0, 7))
         status.pack_propagate(False)
         self.status_text = tk.StringVar(value="Готово. Завантажте OSM усієї України для першого пошуку.")
         ctk.CTkLabel(status, textvariable=self.status_text, text_color=TEXT,
@@ -156,9 +174,10 @@ class App(ctk.CTk):
         self.progress.set(0)
         self.osm_detail = ctk.CTkLabel(status, text="", text_color=MUTED, font=(FONT, 10), anchor="w")
         self.osm_detail.pack(fill="x", padx=15, pady=(3, 0))
+        self.layout.add(controls, height=130, minsize=115, stretch="never")
 
-        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=15)
-        panel.pack(fill="both", expand=True, padx=26, pady=(0, 18))
+        panel = ctk.CTkFrame(self.layout, fg_color=PANEL, corner_radius=15)
+        self.layout.add(panel, minsize=200, stretch="always")
         line = ctk.CTkFrame(panel, fg_color="transparent")
         line.pack(fill="x", padx=16, pady=(13, 10))
         self.count_text = tk.StringVar(value="Контактів: 0")
@@ -214,6 +233,16 @@ class App(ctk.CTk):
                      fg_color="#0d1727", border_color="#29445f", height=34,
                      font=(FONT, 11)).pack(side="left", fill="x", expand=True)
 
+        explanation_line = ctk.CTkFrame(panel, fg_color="transparent")
+        explanation_line.pack(fill="x", padx=16, pady=(0, 7))
+        self.filter_explanation = tk.StringVar(value="")
+        ctk.CTkLabel(explanation_line, textvariable=self.filter_explanation, text_color="#e1b16c",
+                     font=(FONT, 10), anchor="w").pack(side="left", fill="x", expand=True)
+        self.expand_btn = self.button(explanation_line, "Розгорнути групи", self.toggle_all_groups,
+                                      PANEL_RAISED, width=130, height=27, side="right")
+        self.button(explanation_line, "Показати всю базу", self.show_all_contacts,
+                    PANEL_RAISED, width=130, height=27, side="right")
+
         cols = ("mark", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
         headers = ("✓", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
@@ -255,6 +284,8 @@ class App(ctk.CTk):
         self.copy_menu.add_command(label="Відкрити посилання", command=self.open_contact_link)
         ctk.CTkLabel(panel, text="▶ Номери фірми  ·  Подвійний клік: копіювати телефон / посилання  ·  ПКМ: меню  ·  Ctrl+C: копіювати комірку",
                      text_color=MUTED, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(5, 9))
+        self.layout.bind("<ButtonRelease-1>", lambda _event: self.after(80, self.save_pane_ratios))
+        self.after(250, self.restore_layout)
 
     def note_column_drag(self, event):
         self._dragging_separator = self.table.identify_region(event.x, event.y) == "separator"
@@ -338,6 +369,69 @@ class App(ctk.CTk):
             self.table.column(col, width=width)
         self.persist_column_widths()
 
+    def apply_pane_ratios(self, ratios):
+        height = self.layout.winfo_height()
+        if height < 450:
+            return False
+        first = max(145, min(int(height * ratios[0]), height - 335))
+        second = max(first + 125, min(int(height * ratios[1]), height - 210))
+        self.layout.sash_place(0, 0, first)
+        self.layout.sash_place(1, 0, second)
+        return True
+
+    def restore_layout(self):
+        try:
+            ratios = json.loads(self.saved_pane_ratios)
+            if (not isinstance(ratios, list) or len(ratios) != 2 or
+                    not 0.15 <= float(ratios[0]) < 0.65 or
+                    not float(ratios[0]) + 0.13 < float(ratios[1]) <= 0.82):
+                raise ValueError("Invalid pane layout")
+            ratios = tuple(float(value) for value in ratios)
+        except (ValueError, TypeError):
+            ratios = self.DEFAULT_PANE_RATIOS
+        if not self.apply_pane_ratios(ratios):
+            self.after(150, self.restore_layout)
+
+    def save_pane_ratios(self, _event=None):
+        height = self.layout.winfo_height()
+        if height < 450:
+            return
+        ratios = [round(self.layout.sash_coord(i)[1] / height, 4) for i in range(2)]
+        if 0 < ratios[0] < ratios[1] < 1:
+            self.saved_pane_ratios = json.dumps(ratios)
+            with connect_db() as con:
+                write_setting(con, "pane_ratios", self.saved_pane_ratios)
+
+    def reset_layout(self):
+        """Restore UI sizes, never business filters or locally saved contacts."""
+        self.reset_column_widths()
+        self.apply_pane_ratios(self.DEFAULT_PANE_RATIOS)
+        self.saved_pane_ratios = json.dumps(self.DEFAULT_PANE_RATIOS)
+        with connect_db() as con:
+            write_setting(con, "pane_ratios", self.saved_pane_ratios)
+        self.status_text.set("Розміри панелей і стовпців повернуто до стандартних.")
+
+    def show_all_contacts(self):
+        """Reveal existing records without touching the source-search filters."""
+        self.ownership_mode.set("Усі")
+        self.show_prozorro.set(True)
+        self.only_new.set(False)
+        self.search_var.set("")
+        self.change_visibility()
+
+    def toggle_all_groups(self):
+        parents = [item for item in self.table.get_children() if self.table.get_children(item)]
+        if not parents:
+            return
+        expand = not all(bool(self.table.item(item, "open")) for item in parents)
+        for item in parents:
+            self.table.item(item, open=expand)
+            if expand:
+                self.expanded_groups.add(item)
+            else:
+                self.expanded_groups.discard(item)
+        self.expand_btn.configure(text="Згорнути групи" if expand else "Розгорнути групи")
+
     def record_group_open(self, _event=None):
         self.expanded_groups.add(self.table.focus())
 
@@ -374,7 +468,7 @@ class App(ctk.CTk):
                     width=76, height=27, side="right")
         box = ctk.CTkScrollableFrame(card, height=174, fg_color="#0d1727", corner_radius=9,
                                       scrollbar_button_color="#29445f")
-        box.pack(fill="x", padx=12, pady=(0, 12))
+        box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         box.grid_columnconfigure((0, 1), weight=1)
         for i, (name, var) in enumerate(variables.items()):
             ctk.CTkCheckBox(box, text=name, variable=var, width=22, height=24,
@@ -609,9 +703,15 @@ class App(ctk.CTk):
         with connect_db() as con:
             all_rows = read_contacts(con)
             source_rows = read_contacts(con, include_prozorro=self.show_prozorro.get())
-        source_rows = filter_ownership(source_rows, self.ownership_mode.get())
-        values = [row for row in source_rows if row["status"] == "Не опрацьований"] if self.only_new.get() else source_rows
+        excluded_source = len(all_rows) - len(source_rows)
+        ownership_rows = filter_ownership(source_rows, self.ownership_mode.get())
+        excluded_ownership = len(source_rows) - len(ownership_rows)
+        eligible_rows = ([row for row in ownership_rows if row["status"] == "Не опрацьований"]
+                         if self.only_new.get() else ownership_rows)
+        excluded_status = len(ownership_rows) - len(eligible_rows)
+        values = eligible_rows
         values = filter_contacts(values, self.search_var.get())
+        excluded_search = len(eligible_rows) - len(values)
         groups = group_contacts_by_company(values)
         for id_ in self.table.get_children():
             self.table.delete(id_)
@@ -651,8 +751,19 @@ class App(ctk.CTk):
         self.table.tag_configure("group", foreground="#f3f7fe")
         self.table.tag_configure("child", background="#0e1a2b", foreground="#b7c9e1")
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
-        self.count_text.set(f"Фірм: {len(groups)}  ·  Номерів: {len(values)}  ·  Нові: {len(all_rows) - reviewed}  ·  "
-                            f"Опрацьовані: {reviewed}    ·    Усього: {len(all_rows)}")
+        self.count_text.set(f"Показано: {len(groups)} фірм / {len(values)} номерів із {len(all_rows)}  ·  "
+                            f"Нові у базі: {len(all_rows) - reviewed}  ·  Опрацьовані: {reviewed}")
+        hidden = len(all_rows) - len(values)
+        if hidden:
+            reasons = [("джерело", excluded_source), ("тип", excluded_ownership),
+                       ("статус", excluded_status), ("пошук", excluded_search)]
+            detail = "  ·  ".join(f"{label}: {count}" for label, count in reasons if count)
+            self.filter_explanation.set(f"Приховано фільтрами {hidden} номерів ({detail}).")
+        else:
+            self.filter_explanation.set("Показані всі номери з бази. Групи можна розгортати стрілкою.")
+        parents = [item for item in self.table.get_children() if self.table.get_children(item)]
+        is_expanded = bool(parents) and all(bool(self.table.item(item, "open")) for item in parents)
+        self.expand_btn.configure(text="Згорнути групи" if is_expanded else "Розгорнути групи")
 
     @staticmethod
     def contact_values(row):
