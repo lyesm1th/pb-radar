@@ -425,6 +425,20 @@ def filter_contacts(rows: list[dict], query: str) -> list[dict]:
     return result
 
 
+def visible_link(row: dict) -> str:
+    """The actual website/social/source URL shown in the last table column."""
+    return str(row.get("website") or row.get("social") or row.get("source_url") or "")
+
+
+def copyable_contact_value(row: dict, column: str) -> str:
+    """Return a real cell value, never a grouped row's phone-count label."""
+    if column == "phone" and row.get("is_group"):
+        return ""
+    if column == "website":
+        return visible_link(row)
+    return str(row.get(column) or "")
+
+
 def export_csv(path: Path, rows: list[dict]) -> None:
     headings = ("name", "category", "region", "phone", "role", "status", "ownership", "edrpou",
                 "website", "social", "source_url", "checked_at", "activity")

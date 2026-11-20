@@ -4,7 +4,8 @@ import datetime as dt
 from pathlib import Path
 
 from pbradar.core import (classify, classify_ownership, company_key, connect_db, export_csv,
-                          filter_contacts, filter_ownership, group_contacts_by_company,
+                          copyable_contact_value, filter_contacts, filter_ownership,
+                          group_contacts_by_company, visible_link,
                           mark_site_checked, parse_ua_phones,
                           read_column_widths, read_contacts, read_setting, save_contact,
                           set_company_ownership, set_phone_status, site_needs_check,
@@ -15,6 +16,23 @@ from pbradar.launcher import safe_version
 
 
 class CoreTests(unittest.TestCase):
+    def test_copyable_phone_and_visible_link_are_exact_cell_values(self):
+        row = {"name": "ТОВ Будмонтаж", "phone": "+380671234567",
+               "website": "https://budmontazh.ua", "social": "https://instagram.com/build",
+               "source_url": "https://prozorro.gov.ua/tender/UA-2026-11-20-000001-a"}
+        self.assertEqual(copyable_contact_value(row, "phone"), "+380671234567")
+        self.assertEqual(copyable_contact_value(row, "website"), "https://budmontazh.ua")
+        self.assertEqual(copyable_contact_value(row, "name"), "ТОВ Будмонтаж")
+        self.assertEqual(copyable_contact_value({**row, "is_group": True}, "phone"), "")
+        self.assertEqual(copyable_contact_value({**row, "is_group": True}, "website"),
+                         "https://budmontazh.ua")
+        self.assertEqual(visible_link({"website": "", "social": "https://instagram.com/build",
+                                       "source_url": "https://prozorro.gov.ua/tender/x"}),
+                         "https://instagram.com/build")
+        self.assertEqual(visible_link({"source_url": "https://prozorro.gov.ua/tender/x"}),
+                         "https://prozorro.gov.ua/tender/x")
+        self.assertEqual(visible_link({}), "")
+
     def test_companies_group_phones_and_matching_edrpou_across_addresses(self):
         with tempfile.TemporaryDirectory() as temp:
             with connect_db(Path(temp) / "db.sqlite3") as con:

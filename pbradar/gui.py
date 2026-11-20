@@ -19,11 +19,12 @@ from PIL import Image, ImageTk
 from . import __version__
 from .branding import red_mark_icon
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES, OWNERSHIP_FILTERS,
-                   OWNERSHIP_TYPES, company_key, connect_db, export_csv, filter_contacts, filter_ownership,
+                   OWNERSHIP_TYPES, company_key, connect_db, copyable_contact_value,
+                   export_csv, filter_contacts, filter_ownership,
                    group_contacts_by_company, mark_site_checked, parse_ua_phones,
                    read_column_widths, read_contacts,
                    read_setting, save_contact, set_company_ownership, set_phone_status,
-                   site_needs_check, write_setting)
+                   site_needs_check, visible_link, write_setting)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
@@ -235,6 +236,7 @@ class App(ctk.CTk):
         hor.pack(side="bottom", fill="x")
         self.table.pack(fill="both", expand=True)
         self._dragging_separator = False
+        self._focused_column = "#7"  # Phone column until the user selects another cell.
         self.table.bind("<ButtonPress-1>", self.note_column_drag)
         self.table.bind("<ButtonRelease-1>", self.toggle_from_click)
         self.table.bind("<ButtonRelease-1>", self.save_resized_columns, add="+")
@@ -242,11 +244,83 @@ class App(ctk.CTk):
         self.table.bind("<<TreeviewOpen>>", self.record_group_open)
         self.table.bind("<<TreeviewClose>>", self.record_group_close)
         self.table.bind("<Double-1>", self.open_selected)
-        ctk.CTkLabel(panel, text="▶ Розгорнути номери фірми  ·  ☐ / ☑ — змінити статус  ·  Перетягни межу заголовка для зміни ширини",
+        self.table.bind("<Button-3>", self.show_cell_menu)
+        self.table.bind("<Control-c>", self.copy_selected_cell)
+        self.copy_menu = tk.Menu(self.table, tearoff=False, bg=PANEL_RAISED, fg=TEXT,
+                                 activebackground="#315174", activeforeground="white")
+        self.copy_menu.add_command(label="Копіювати номер", command=lambda: self.copy_contact_field("phone"))
+        self.copy_menu.add_command(label="Копіювати посилання", command=lambda: self.copy_contact_field("website"))
+        self.copy_menu.add_command(label="Копіювати комірку (Ctrl+C)", command=self.copy_selected_cell)
+        self.copy_menu.add_separator()
+        self.copy_menu.add_command(label="Відкрити посилання", command=self.open_contact_link)
+        ctk.CTkLabel(panel, text="▶ Номери фірми  ·  Подвійний клік: копіювати телефон / посилання  ·  ПКМ: меню  ·  Ctrl+C: копіювати комірку",
                      text_color=MUTED, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(5, 9))
 
     def note_column_drag(self, event):
         self._dragging_separator = self.table.identify_region(event.x, event.y) == "separator"
+        if self.table.identify_region(event.x, event.y) == "cell":
+            self._focused_column = self.table.identify_column(event.x)
+
+    def show_cell_menu(self, event):
+        item_id = self.table.identify_row(event.y)
+        if not item_id or item_id not in self.rows:
+            return
+        self.table.selection_set(item_id)
+        self.table.focus(item_id)
+        self.table.focus_set()
+        self._focused_column = self.table.identify_column(event.x)
+        row = self.rows[item_id]
+        self.copy_menu.entryconfigure(0, state="normal" if copyable_contact_value(row, "phone") else "disabled")
+        link_state = "normal" if visible_link(row) else "disabled"
+        self.copy_menu.entryconfigure(1, state=link_state)
+        self.copy_menu.entryconfigure(4, state=link_state)
+        try:
+            self.copy_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.copy_menu.grab_release()
+
+    def copy_text(self, value: str, label: str) -> bool:
+        if not value:
+            return False
+        self.clipboard_clear()
+        self.clipboard_append(value)
+        self.update_idletasks()
+        self.status_text.set(f"Скопійовано {label}: {value}")
+        return True
+
+    def copy_contact_field(self, column: str) -> bool:
+        selected = self.table.selection()
+        if not selected or selected[0] not in self.rows:
+            return False
+        row = self.rows[selected[0]]
+        label = "номер" if column == "phone" else "посилання"
+        return self.copy_text(copyable_contact_value(row, column), label)
+
+    def copy_selected_cell(self, _event=None):
+        selected = self.table.selection()
+        if not selected or selected[0] not in self.rows:
+            return "break"
+        field = self._focused_column
+        if not field.startswith("#") or not field[1:].isdigit():
+            return "break"
+        index = int(field[1:]) - 1
+        columns = self.table["columns"]
+        if not 0 <= index < len(columns):
+            return "break"
+        column = columns[index]
+        row = self.rows[selected[0]]
+        if column == "phone" and row.get("is_group"):
+            return "break"  # Never copy the "7 номерів" summary as a real phone.
+        value = self.table.set(selected[0], column)
+        self.copy_text(str(value), "комірку")
+        return "break"
+
+    def open_contact_link(self):
+        selected = self.table.selection()
+        if selected and selected[0] in self.rows:
+            url = visible_link(self.rows[selected[0]])
+            if url:
+                webbrowser.open(url)
 
     def save_resized_columns(self, _event=None):
         if self._dragging_separator:
@@ -560,7 +634,7 @@ class App(ctk.CTk):
             self.table.insert("", "end", iid=group_id, open=group_id in self.expanded_groups,
                               values=("", row["name"], row["category"], region_label,
                                       row["ownership"], row.get("edrpou", ""), label, "", row["activity"], "", "",
-                                      row.get("website") or row.get("social") or row.get("source_url") or ""),
+                                      visible_link(row)),
                               tags=(tag, "group"))
             for item in entries:
                 child_id = "contact:" + str(item["id"])
@@ -585,7 +659,7 @@ class App(ctk.CTk):
         return (("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
             row.get(k, "") for k in
             ("name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status")) +
-            (row.get("website") or row.get("social") or row.get("source_url") or "",))
+            (visible_link(row),))
 
     def sync_status(self, _event=None):
         selected = self.table.selection()
@@ -633,6 +707,9 @@ class App(ctk.CTk):
         if selected:
             row = self.rows.get(selected[0], {})
             if row.get("is_group"):
+                if event and self.table.identify_column(event.x) == "#12":
+                    self.copy_contact_field("website")
+                    return
                 if event and self.table.identify_region(event.x, event.y) == "tree":
                     return  # The native expand-arrow handler already does this.
                 is_open = bool(self.table.item(selected[0], "open"))
@@ -645,13 +722,12 @@ class App(ctk.CTk):
             if event and self.table.identify_column(event.x) == "#1":
                 return
             if event and self.table.identify_column(event.x) == "#7":
-                self.clipboard_clear()
-                self.clipboard_append(row.get("phone", ""))
-                self.status_text.set("Номер скопійовано: " + row.get("phone", ""))
+                self.copy_contact_field("phone")
                 return
-            url = row.get("website") or row.get("social") or row.get("source_url")
-            if url:
-                webbrowser.open(url)
+            if event and self.table.identify_column(event.x) == "#12":
+                self.copy_contact_field("website")
+                return
+            self.open_contact_link()
 
     def import_contacts(self):
         filename = filedialog.askopenfilename(title="Імпорт бази", filetypes=[("CSV", "*.csv")])
