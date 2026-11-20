@@ -646,7 +646,7 @@ class App(ctk.CTk):
             lun_text = ""
             if "Забудовники" in categories and not self.cancel.is_set():
                 try:
-                    lun = scan_lun(regions, cancel=self.cancel, max_profiles=100,
+                    lun = scan_lun(regions, cancel=self.cancel,
                                    progress=lambda s: self.ui_event("message", s),
                                    refresh=lambda: self.ui_event("refresh", None))
                     lun_text = f" ЛУН: {lun['profiles']} профілів, нових {lun['new']}."
