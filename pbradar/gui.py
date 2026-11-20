@@ -18,12 +18,13 @@ from PIL import Image, ImageTk
 from . import __version__
 from .branding import red_mark_icon
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
-                   connect_db, export_csv, mark_site_checked, parse_ua_phones,
+                   connect_db, export_csv, filter_contacts, mark_site_checked, parse_ua_phones,
                    read_contacts, save_contact, set_phone_status, site_needs_check)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
+from .prozorro import read_cursor, scan_prozorro
 
 STATUSES = CONTACT_STATUSES
 BG = "#090f1c"
@@ -104,7 +105,7 @@ class App(ctk.CTk):
         heading.pack(side="left", padx=17)
         ctk.CTkLabel(heading, text="Пошук публічних робочих контактів",
                      text_color=TEXT, font=(FONT, 15, "bold")).pack(anchor="w")
-        ctk.CTkLabel(heading, text="Вся Україна  ·  OSM  ·  Без CRM", text_color=MUTED,
+        ctk.CTkLabel(heading, text="Вся Україна  ·  OSM + Prozorro  ·  Без CRM", text_color=MUTED,
                      font=(FONT, 11)).pack(anchor="w", pady=(4, 0))
         self.osm_badge = ctk.CTkLabel(top, text="OSM · перевірка…", text_color=ACCENT,
                                       fg_color=PANEL_RAISED, corner_radius=12, height=34,
@@ -125,6 +126,8 @@ class App(ctk.CTk):
         self.stop_btn = self.button(toolbar, "■   Зупинити", self.stop_search, PANEL_RAISED)
         self.download_btn = self.button(toolbar, "↓   Завантажити / оновити OSM", self.download_osm, "#24528a")
         self.source_btn = self.button(toolbar, "Власний PBF", self.choose_source, PANEL_RAISED)
+        self.prozorro_btn = self.button(toolbar, "Prozorro · контакти", self.start_prozorro,
+                                       "#24528a", width=145)
         self.export_btn = self.button(toolbar, "Експорт CSV", self.export, PANEL_RAISED, side="right")
         self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, PANEL_RAISED, side="right")
 
@@ -160,6 +163,20 @@ class App(ctk.CTk):
         self.status_box.pack(side="right")
         ctk.CTkLabel(line, text="Статус номера", text_color=MUTED,
                      font=(FONT, 11)).pack(side="right", padx=(0, 10))
+
+        search_line = ctk.CTkFrame(panel, fg_color="transparent")
+        search_line.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(search_line, text="ПОШУК В БАЗІ", text_color=MUTED,
+                     font=(FONT, 11, "bold")).pack(side="left", padx=(0, 12))
+        self.search_var = tk.StringVar()
+        self._search_after = None
+        self.search_var.trace_add("write", self.schedule_search)
+        self.button(search_line, "Очистити", lambda: self.search_var.set(""), PANEL_RAISED,
+                    width=80, height=32, side="right")
+        ctk.CTkEntry(search_line, textvariable=self.search_var,
+                     placeholder_text="Компанія, телефон, область, категорія, статус, сайт, соцмережа…",
+                     fg_color="#0d1727", border_color="#29445f", height=34,
+                     font=(FONT, 11)).pack(side="left", fill="x", expand=True)
 
         cols = ("mark", "name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
         headers = ("✓", "Компанія", "Категорія", "Область", "Телефон", "Призначення",
@@ -251,6 +268,7 @@ class App(ctk.CTk):
                 elif kind == "done":
                     self.working = False
                     self.start_btn.configure(state="normal")
+                    self.prozorro_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
                     self.progress.stop()
@@ -260,6 +278,7 @@ class App(ctk.CTk):
                 elif kind == "error":
                     self.working = False
                     self.start_btn.configure(state="normal")
+                    self.prozorro_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
                     self.progress.stop()
@@ -277,6 +296,7 @@ class App(ctk.CTk):
         self.working = True
         self.cancel.clear()
         self.start_btn.configure(state="disabled")
+        self.prozorro_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
         self.source_btn.configure(state="disabled")
         self.progress.configure(mode="indeterminate")
@@ -376,15 +396,61 @@ class App(ctk.CTk):
 
         self.run_task(work)
 
+    def start_prozorro(self):
+        categories = {name for name, var in self.cat_vars.items() if var.get()}
+        regions = {name for name, var in self.reg_vars.items() if var.get()}
+        if not categories or not regions:
+            messagebox.showwarning("Фільтри", "Вибери хоча б одну категорію та область.")
+            return
+        available = {"Відділи закупівель", "Архітектори", "Архітектурні бюро",
+                     "Проєктні організації", "Будівельні компанії", "Монтажні організації",
+                     "Будівництво складів", "Протипожежні системи",
+                     "Ландшафтні дизайнери", "Дизайнери інтер'єру"}
+        if not (categories & available):
+            messagebox.showinfo("Prozorro", "Для цього джерела вибери закупівлі, архітекторів, "
+                                "дизайнерів, проєктні, будівельні або монтажні організації.")
+            return
+        with connect_db() as con:
+            has_cursor = bool(read_cursor(con))
+        resume = True
+        if has_cursor:
+            answer = messagebox.askyesnocancel(
+                "Prozorro · продовження пошуку",
+                "Продовжити з останньої перевіреної сторінки?\n\n"
+                "Так — шукати старіші записи без повторного проходу.\n"
+                "Ні — почати з найновіших тендерів.\n"
+                "Скасувати — не запускати пошук.")
+            if answer is None:
+                return
+            resume = answer
+
+        def work():
+            result = scan_prozorro(
+                categories, set() if len(regions) == len(REGIONS) else regions,
+                cancel=self.cancel, resume=resume,
+                progress=lambda s: self.ui_event("message", s),
+                refresh=lambda: self.ui_event("refresh", None))
+            return (f"Prozorro: переглянуто {result['examined']:,} закупівель, "
+                    f"контактів {result['leads']:,}, нових номерів {result['new']:,}.")
+
+        self.run_task(work)
+
     def stop_search(self):
         if self.working:
             self.cancel.set()
             self.status_text.set("Зупиняю після поточного запиту…")
 
+    def schedule_search(self, *_):
+        if self._search_after is not None:
+            self.after_cancel(self._search_after)
+        self._search_after = self.after(180, self.refresh)
+
     def refresh(self):
+        self._search_after = None
         with connect_db() as con:
             all_rows = read_contacts(con)
         values = [row for row in all_rows if row["status"] == "Не опрацьований"] if self.only_new.get() else all_rows
+        values = filter_contacts(values, self.search_var.get())
         for id_ in self.table.get_children():
             self.table.delete(id_)
         self.rows = {}
@@ -393,13 +459,15 @@ class App(ctk.CTk):
             self.rows[id_] = row
             values_for_row = ("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
                 row.get(k, "") for k in
-                ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website"))
+                ("name", "category", "region", "phone", "role", "activity", "checked_at", "status")) + (
+                row.get("website") or row.get("social") or row.get("source_url") or "",)
             self.table.insert("", "end", iid=id_, values=values_for_row,
                               tags=("even" if position % 2 == 0 else "odd",))
         self.table.tag_configure("even", background=PANEL)
         self.table.tag_configure("odd", background="#17253a")
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
-        self.count_text.set(f"Нові: {len(all_rows) - reviewed}    ·    Опрацьовані: {reviewed}    ·    Усього: {len(all_rows)}")
+        self.count_text.set(f"Показано: {len(values)}    ·    Нові: {len(all_rows) - reviewed}    ·    "
+                            f"Опрацьовані: {reviewed}    ·    Усього: {len(all_rows)}")
 
     def sync_status(self, _event=None):
         selected = self.table.selection()
@@ -442,7 +510,7 @@ class App(ctk.CTk):
                 self.clipboard_append(row.get("phone", ""))
                 self.status_text.set("Номер скопійовано: " + row.get("phone", ""))
                 return
-            url = row.get("source_url") or row.get("website")
+            url = row.get("website") or row.get("social") or row.get("source_url")
             if url:
                 webbrowser.open(url)
 
@@ -480,6 +548,7 @@ class App(ctk.CTk):
         if path:
             with connect_db() as con:
                 rows = read_contacts(con, ("Не опрацьований",) if self.only_new.get() else ())
+            rows = filter_contacts(rows, self.search_var.get())
             export_csv(Path(path), rows)
             messagebox.showinfo("Експорт", f"Збережено {len(rows)} контактів.")
 

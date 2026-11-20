@@ -171,6 +171,10 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             website TEXT PRIMARY KEY, checked_at TEXT NOT NULL,
             phone_count INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS source_cursors (
+            source TEXT PRIMARY KEY, offset TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
     """)
     return con
 
@@ -265,6 +269,35 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = ()) -> li
         args = list(statuses)
     sql += " ORDER BY c.checked_at DESC, p.name"
     return [dict(row) for row in con.execute(sql, args)]
+
+
+SEARCH_FIELDS = (
+    "name", "category", "region", "phone", "role", "status", "website",
+    "social", "source_url", "checked_at", "activity",
+)
+
+
+def filter_contacts(rows: list[dict], query: str) -> list[dict]:
+    """Search every displayed/stored contact field; terms can match separately.
+
+    Recognize both +380... and the 0XX... Ukrainian local form so managers
+    can paste either number format. Search is offline and read-only.
+    """
+    terms = query.casefold().replace("’", "'").split()
+    if not terms:
+        return rows
+    result = []
+    for row in rows:
+        haystack = " ".join(str(row.get(field) or "") for field in SEARCH_FIELDS).casefold().replace("’", "'")
+        phone = str(row.get("phone") or "")
+        digits = re.sub(r"\D", "", phone)
+        local_digits = "0" + digits[3:] if digits.startswith("380") else digits
+        if all(term in haystack or (
+            (needle := re.sub(r"\D", "", term)) and len(needle) >= 2 and
+            (needle in digits or needle in local_digits)
+        ) for term in terms):
+            result.append(row)
+    return result
 
 
 def export_csv(path: Path, rows: list[dict]) -> None:

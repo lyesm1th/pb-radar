@@ -121,6 +121,8 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
         class Handler(osmium.SimpleHandler):
             scanned = 0
             found = 0
+            with_phones = 0
+            website_only = 0
             relevant = 0
             no_contacts = 0
             no_region = 0
@@ -140,9 +142,9 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                     eta = (f"~{round(remaining / 60)} хв" if remaining >= 120
                            else f"~{round(remaining)} с")
                     fraction = (100 * self.scanned / total) if total else 100
-                    progress(f"OSM {self.scanned:,} / {total:,} ({fraction:.1f}%) · "
+                    progress(f"OSM-об'єкти {self.scanned:,} / {total:,} ({fraction:.1f}%) · "
                              f"залишилось {eta} · кандидатів {self.relevant:,} · "
-                             f"із контактами {self.found:,}")
+                             f"з телефоном {self.with_phones:,} · лише сайт {self.website_only:,}")
 
             def _add(self, obj, region: str, tags: dict, groups: set[str], name: str):
                 if cancel is not None and cancel.is_set():
@@ -152,6 +154,10 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                     self.no_contacts += 1
                 else:
                     self.found += 1
+                    if phones:
+                        self.with_phones += 1
+                    else:
+                        self.website_only += 1
                 if region == "Не визначено":
                     self.no_region += 1
                 osm_type = {"n": "node", "w": "way", "r": "relation"}.get(obj.type_str(), obj.type_str())
@@ -165,7 +171,8 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                 if self.relevant % 400 == 0:
                     con.commit()
                     if progress:
-                        progress(f"Індекс України: {self.relevant:,} кандидатів · {self.found:,} з контактом")
+                        progress(f"Індекс України: {self.relevant:,} кандидатів · "
+                                 f"{self.with_phones:,} з телефоном · {self.website_only:,} лише із сайтом")
 
             def _consider(self, obj, tags: dict, region: str):
                 name = osm_business_name(tags, obj.id)
@@ -239,14 +246,17 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                          ("way_count", str(ways)), ("relation_count", str(relations)),
                          ("relevant_candidates", str(handler.relevant)),
                          ("without_public_contacts", str(handler.no_contacts)),
+                         ("with_public_phone", str(handler.with_phones)),
+                         ("website_without_phone", str(handler.website_only)),
                          ("unknown_region", str(handler.no_region))])
         con.commit()
         con.close()
         stage.replace(db_path)
         if progress:
-            progress(f"Індекс готовий: {handler.relevant:,} релевантних об'єктів · "
-                     f"{handler.found:,} із телефоном або сайтом · "
-                     f"{handler.no_contacts:,} без публічних контактів в OSM")
+            progress(f"Індекс готовий: {handler.relevant:,} кандидатів · "
+                     f"{handler.with_phones:,} з телефонами OSM · "
+                     f"{handler.website_only:,} лише із сайтом · "
+                     f"{handler.no_contacts:,} без телефону/сайту")
         return handler.found
     except BaseException:
         con.close()

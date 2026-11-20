@@ -3,7 +3,7 @@ import unittest
 import datetime as dt
 from pathlib import Path
 
-from pbradar.core import (classify, company_key, connect_db, export_csv,
+from pbradar.core import (classify, company_key, connect_db, export_csv, filter_contacts,
                           mark_site_checked, parse_ua_phones, read_contacts, save_contact,
                           set_phone_status, site_needs_check)
 from pbradar.discovery import (RegionIndex, address_region, extract_business_contacts,
@@ -12,6 +12,22 @@ from pbradar.launcher import safe_version
 
 
 class CoreTests(unittest.TestCase):
+    def test_search_matches_all_contact_fields_and_local_number_format(self):
+        rows = [{"name": "АрхБюро Львів", "category": "Архітектори", "region": "Львівська",
+                 "phone": "+380671234567", "status": "Опрацьовано",
+                 "website": "https://design.example", "social": "https://instagram.com/design",
+                 "role": "Керівник", "activity": "Публікація за 180 днів",
+                 "checked_at": "2026-11-20", "source_url": "https://www.openstreetmap.org/node/7"},
+                {"name": "Будівельна Фірма", "category": "Будівельні компанії",
+                 "region": "Київська", "phone": "+380501234567", "status": "Не опрацьований"}]
+        for term in ("архбюро", "ЛЬВІВСЬКА", "0671234567", "+380 6712", "архітектори",
+                     "опрацьовано", "instagram.com", "design.example", "керівник",
+                     "2026-11-20", "openstreetmap.org/node/7", "львівська 067"):
+            with self.subTest(term=term):
+                self.assertEqual(filter_contacts(rows, term), rows[:1])
+        self.assertEqual(filter_contacts(rows, "неіснуюча компанія"), [])
+        self.assertEqual(filter_contacts(rows, ""), rows)
+
     def test_ukrainian_numbers_only(self):
         text = "Тел.: +380 67 123 45 67; 0671234567; +48 221 234 567"
         self.assertEqual(parse_ua_phones(text), ["+380671234567"])
