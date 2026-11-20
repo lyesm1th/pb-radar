@@ -33,6 +33,12 @@ REGIONS = (
     "АР Крим", "м. Севастополь",
 )
 
+CONTACT_STATUSES = (
+    "Не опрацьований", "Опрацьовано", "Зателефонували", "Не відповідає",
+    "Номер недійсний", "Не цікавить співпраця", "Потенційний партнер",
+    "Співпрацюємо", "Не контактувати",
+)
+
 # Match business categories using public OSM tags and business names. Inference
 # does not imply the phone belongs to a named individual or department.
 RULES = {
@@ -143,7 +149,11 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
                  phone: str, website: str = "", source_url: str = "",
                  activity: str = "Невідомо", role: str = "Не визначено",
                  social: str = "") -> bool:
-    """Upsert contact and preserve user-set status; return True for new phone/company pair."""
+    """Upsert phone and preserve its review status across searches and companies.
+
+    Returns True only if this *phone number* has never been seen before, even
+    when the same public number appears on another company's website.
+    """
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     key = company_key(name, website, region)
     con.execute("""
@@ -158,27 +168,48 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
             activity=CASE WHEN excluded.activity != 'Невідомо' THEN excluded.activity ELSE companies.activity END
     """, (key, name, category, region, website, social, source_url, now, activity))
     company_id = con.execute("SELECT id FROM companies WHERE company_key=?", (key,)).fetchone()[0]
-    existing = con.execute(
-        "SELECT id FROM contacts WHERE company_id=? AND phone=?", (company_id, phone)
+    prior = con.execute(
+        """SELECT status FROM contacts WHERE phone=?
+           ORDER BY CASE WHEN status='Не опрацьований' THEN 1 ELSE 0 END, id
+           LIMIT 1""", (phone,)
     ).fetchone()
+    inherited_status = prior["status"] if prior else "Не опрацьований"
     con.execute("""
-        INSERT INTO contacts(company_id, phone, role, found_at, checked_at, source_url)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO contacts(company_id, phone, role, status, found_at, checked_at, source_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company_id,phone) DO UPDATE SET
             checked_at=excluded.checked_at,
             source_url=CASE WHEN excluded.source_url != '' THEN excluded.source_url ELSE contacts.source_url END,
             role=CASE WHEN contacts.role='Не визначено' THEN excluded.role ELSE contacts.role END
-    """, (company_id, phone, role, now, now, source_url))
-    return existing is None
+    """, (company_id, phone, role, inherited_status, now, now, source_url))
+    return prior is None
+
+
+def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
+    """Mark every record of the same number so it never reappears as new."""
+    if status not in CONTACT_STATUSES:
+        raise ValueError("Невідомий статус контакту")
+    cursor = con.execute("UPDATE contacts SET status=? WHERE phone=?", (status, phone))
+    return cursor.rowcount
 
 
 def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = ()) -> list[dict]:
+    # Show one row per number, prioritizing an already-reviewed association.
+    # All underlying source/company associations remain in SQLite.
     sql = """SELECT c.id, p.name, p.category, p.region, c.phone, c.role, c.status,
                     p.website, p.social, c.source_url, c.checked_at, p.activity
-             FROM contacts c JOIN companies p ON p.id=c.company_id"""
+             FROM contacts c JOIN companies p ON p.id=c.company_id
+             WHERE c.id IN (
+                 SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY phone ORDER BY
+                         CASE WHEN status='Не опрацьований' THEN 1 ELSE 0 END, id
+                     ) AS row_rank FROM contacts
+                 ) WHERE row_rank = 1
+             )"""
     args: list[str] = []
     if statuses:
-        sql += " WHERE c.status IN (" + ",".join("?" for _ in statuses) + ")"
+        sql += " AND c.status IN (" + ",".join("?" for _ in statuses) + ")"
         args = list(statuses)
     sql += " ORDER BY c.checked_at DESC, p.name"
     return [dict(row) for row in con.execute(sql, args)]
@@ -189,4 +220,8 @@ def export_csv(path: Path, rows: list[dict]) -> None:
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headings, extrasaction="ignore", delimiter=";")
         writer.writeheader()
-        writer.writerows(rows)
+        # Untrusted business names can begin with spreadsheet formula markers.
+        # Prefix such values as text to avoid formula execution on opening CSV.
+        for row in rows:
+            writer.writerow({key: "'" + str(row.get(key, "")) if str(row.get(key, "")).startswith(("=", "+", "-", "@", "\t", "\r", "\n"))
+                             else row.get(key, "") for key in headings})

@@ -12,14 +12,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .core import (BASE_DIR, CATEGORIES, REGIONS, DB_PATH, connect_db,
-                   export_csv, parse_ua_phones, read_contacts, save_contact)
+from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
+                   connect_db, export_csv, parse_ua_phones, read_contacts,
+                   save_contact, set_phone_status)
 from .discovery import (OSM_URL, RegionIndex, WebsiteReader, download_file,
                         ensure_regions, find_osm_leads, read_site_numbers)
 
 OSM_FILE = BASE_DIR / "cache" / "ukraine-latest.osm.pbf"
-STATUSES = ("Не опрацьований", "Зателефонували", "Не відповідає", "Номер недійсний",
-            "Не цікавить співпраця", "Потенційний партнер", "Співпрацюємо", "Не контактувати")
+STATUSES = CONTACT_STATUSES
 
 
 class App(tk.Tk):
@@ -99,7 +99,7 @@ class App(tk.Tk):
         self.count_text = tk.StringVar(value="Контакти: 0")
         tk.Label(line, textvariable=self.count_text, bg="#f8fafc", fg="#17304f",
                  font=("Segoe UI Semibold", 12)).pack(side="left")
-        self.only_new = tk.BooleanVar(value=False)
+        self.only_new = tk.BooleanVar(value=True)
         tk.Checkbutton(line, text="Лише не опрацьовані", variable=self.only_new,
                        command=self.refresh, bg="#f8fafc", fg="#17304f").pack(side="left", padx=20)
         tk.Label(line, text="Статус вибраного:", bg="#f8fafc", fg="#17304f").pack(side="right", padx=8)
@@ -108,22 +108,26 @@ class App(tk.Tk):
         self.status_box.pack(side="right")
         self.status_box.bind("<<ComboboxSelected>>", self.change_status)
 
-        cols = ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
-        headers = ("Компанія", "Категорія", "Область", "Телефон", "Призначення",
+        cols = ("mark", "name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
+        headers = ("✓", "Компанія", "Категорія", "Область", "Телефон", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
-        widths = (170, 150, 115, 145, 105, 150, 145, 130, 170)
+        widths = (45, 170, 150, 115, 145, 105, 150, 145, 130, 170)
         self.table = ttk.Treeview(panel, columns=cols, show="headings", selectmode="browse")
         for col, title, width in zip(cols, headers, widths):
             self.table.heading(col, text=title)
-            self.table.column(col, width=width, minwidth=90, stretch=(col in ("name", "website")))
+            self.table.column(col, width=width, minwidth=40 if col == "mark" else 90,
+                              anchor="center" if col == "mark" else "w",
+                              stretch=(col in ("name", "website")))
         vert = ttk.Scrollbar(panel, orient="vertical", command=self.table.yview)
         hor = ttk.Scrollbar(panel, orient="horizontal", command=self.table.xview)
         self.table.configure(yscrollcommand=vert.set, xscrollcommand=hor.set)
         vert.pack(side="right", fill="y")
         hor.pack(side="bottom", fill="x")
         self.table.pack(fill="both", expand=True)
+        self.table.bind("<ButtonRelease-1>", self.toggle_from_click)
+        self.table.bind("<<TreeviewSelect>>", self.sync_status)
         self.table.bind("<Double-1>", self.open_selected)
-        tk.Label(panel, text="Подвійний клік по номеру — скопіювати; по іншому полю — відкрити джерело. Дані зберігаються локально.",
+        tk.Label(panel, text="Клік по ☐/☑ — позначити номер. Щоб переглянути вже опрацьовані, зніми фільтр. Подвійний клік по номеру — копіювати.",
                  fg="#657995", bg="#f8fafc", font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
 
     @staticmethod
@@ -256,32 +260,59 @@ class App(tk.Tk):
             self.status_text.set("Зупиняю після поточного запиту…")
 
     def refresh(self):
-        statuses = ("Не опрацьований",) if self.only_new.get() else ()
         with connect_db() as con:
-            values = read_contacts(con, statuses)
+            all_rows = read_contacts(con)
+        values = [row for row in all_rows if row["status"] == "Не опрацьований"] if self.only_new.get() else all_rows
         for id_ in self.table.get_children():
             self.table.delete(id_)
         self.rows = {}
         for row in values:
             id_ = str(row["id"])
             self.rows[id_] = row
-            self.table.insert("", "end", iid=id_, values=tuple(row.get(k, "") for k in
-                              ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")))
-        self.count_text.set(f"Контакти: {len(values)}")
+            values_for_row = ("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
+                row.get(k, "") for k in
+                ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website"))
+            self.table.insert("", "end", iid=id_, values=values_for_row)
+        reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
+        self.count_text.set(f"До опрацювання: {len(all_rows) - reviewed}  ·  Опрацьовано: {reviewed}")
+
+    def sync_status(self, _event=None):
+        selected = self.table.selection()
+        if selected and selected[0] in self.rows:
+            self.status_box.set(self.rows[selected[0]]["status"])
+
+    def toggle_from_click(self, event):
+        if self.table.identify_column(event.x) != "#1":
+            return
+        row_id = self.table.identify_row(event.y)
+        if not row_id or row_id not in self.rows:
+            return
+        row = self.rows[row_id]
+        new_status = "Опрацьовано" if row["status"] == "Не опрацьований" else "Не опрацьований"
+        with connect_db() as con:
+            set_phone_status(con, row["phone"], new_status)
+        self.refresh()
+        self.status_text.set(f"{row['phone']} → {new_status}")
+        return "break"
 
     def change_status(self, _event=None):
         selected = self.table.selection()
-        if not selected:
+        if not selected or selected[0] not in self.rows:
             return
+        phone = self.rows[selected[0]]["phone"]
+        new_status = self.status_box.get()
         with connect_db() as con:
-            con.execute("UPDATE contacts SET status=? WHERE id=?", (self.status_box.get(), int(selected[0])))
+            set_phone_status(con, phone, new_status)
         self.refresh()
+        self.status_text.set(f"{phone} → {new_status}")
 
     def open_selected(self, event=None):
         selected = self.table.selection()
         if selected:
             row = self.rows.get(selected[0], {})
-            if event and self.table.identify_column(event.x) == "#4":
+            if event and self.table.identify_column(event.x) == "#1":
+                return
+            if event and self.table.identify_column(event.x) == "#5":
                 self.clipboard_clear()
                 self.clipboard_append(row.get("phone", ""))
                 self.status_text.set("Номер скопійовано: " + row.get("phone", ""))
@@ -309,6 +340,9 @@ class App(tk.Tk):
                         count += save_contact(con, name, row.get("category", "Імпорт"),
                                               row.get("region", "Не визначено"), phone,
                                               row.get("website", ""), row.get("source_url", ""))
+                        imported_status = (row.get("status") or "").strip()
+                        if imported_status in STATUSES and imported_status != "Не опрацьований":
+                            set_phone_status(con, phone, imported_status)
             self.refresh()
             messagebox.showinfo("Імпорт завершено", f"Додано нових контактів: {count}")
         except (OSError, UnicodeError, csv.Error) as exc:
