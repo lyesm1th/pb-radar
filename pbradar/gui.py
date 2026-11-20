@@ -11,6 +11,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import __version__
 from .core import (BASE_DIR, CATEGORIES, REGIONS, DB_PATH, connect_db,
                    export_csv, parse_ua_phones, read_contacts, save_contact)
 from .discovery import (OSM_URL, RegionIndex, WebsiteReader, download_file,
@@ -24,7 +25,7 @@ STATUSES = ("Не опрацьований", "Зателефонували", "Н
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PB Radar · Пошук контактів")
+        self.title(f"PB Radar {__version__} · Пошук контактів")
         self.geometry("1190x790")
         self.minsize(950, 680)
         self.configure(bg="#0b1220")
