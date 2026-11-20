@@ -372,23 +372,37 @@ def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
 
 
 def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
-                  *, include_prozorro: bool = True) -> list[dict]:
+                  *, include_prozorro: bool = True,
+                  categories: set[str] | None = None,
+                  regions: set[str] | None = None) -> list[dict]:
     # Show one row per number, prioritizing an already-reviewed association.
-    # All underlying source/company associations remain in SQLite.
+    # Filter before ranking: if a number belongs to two organizations, an
+    # eligible category/region can still show it instead of silently losing it.
+    # None = all; empty set = explicitly no categories/regions selected.
+    clauses = ["(?=1 OR LOWER(c2.source_url) NOT LIKE '%prozorro.gov.ua%')"]
+    args: list[str | int] = [int(include_prozorro)]
+    for field, selected in (("category", categories), ("region", regions)):
+        if selected is not None:
+            if not selected:
+                clauses.append("1=0")
+            else:
+                clauses.append(f"p2.{field} IN ({','.join('?' for _ in selected)})")
+                args.extend(sorted(selected))
+    filter_sql = " AND ".join(clauses)
     sql = """SELECT c.id, p.id AS company_id, p.name, p.category, p.region, c.phone,
                     c.role, c.status, p.website, p.social, c.source_url, c.checked_at,
                     p.activity, p.ownership, p.edrpou
              FROM contacts c JOIN companies p ON p.id=c.company_id
              WHERE c.id IN (
                  SELECT id FROM (
-                     SELECT id, ROW_NUMBER() OVER (
-                         PARTITION BY phone ORDER BY
-                         CASE WHEN status='Не опрацьований' THEN 1 ELSE 0 END, id
-                     ) AS row_rank FROM contacts
-                     WHERE (?=1 OR LOWER(source_url) NOT LIKE '%prozorro.gov.ua%')
+                     SELECT c2.id, ROW_NUMBER() OVER (
+                         PARTITION BY c2.phone ORDER BY
+                         CASE WHEN c2.status='Не опрацьований' THEN 1 ELSE 0 END, c2.id
+                     ) AS row_rank FROM contacts c2
+                     JOIN companies p2 ON p2.id=c2.company_id
+                     WHERE """ + filter_sql + """
                  ) WHERE row_rank = 1
              )"""
-    args: list[str | int] = [int(include_prozorro)]
     if statuses:
         sql += " AND c.status IN (" + ",".join("?" for _ in statuses) + ")"
         args.extend(statuses)

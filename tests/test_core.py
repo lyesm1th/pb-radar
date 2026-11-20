@@ -16,6 +16,33 @@ from pbradar.launcher import safe_version
 
 
 class CoreTests(unittest.TestCase):
+    def test_saved_contacts_respect_selected_categories_and_regions_without_rescanning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with connect_db(Path(temp) / "contacts.sqlite3") as con:
+                repeated_phone = "+380671234567"
+                save_contact(con, "ТОВ Архітектурне бюро", "Архітектори", "Київська",
+                             repeated_phone, "https://arch.example")
+                save_contact(con, "ТОВ Генпідряд", "Генпідрядні організації", "Львівська",
+                             repeated_phone, "https://general.example")
+                save_contact(con, "ТОВ Будмонтаж", "Монтажні організації", "Львівська",
+                             "+380501234567", "https://install.example")
+                self.assertEqual(len(read_contacts(con)), 2)
+                selected = read_contacts(con, categories={"Генпідрядні організації"},
+                                         regions={"Львівська"})
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0]["name"], "ТОВ Генпідряд")
+                self.assertEqual(selected[0]["phone"], repeated_phone)
+                self.assertEqual(read_contacts(con, categories={"Архітектори"},
+                                               regions={"Львівська"}), [])
+                self.assertEqual(len(read_contacts(con, categories={"Монтажні організації"},
+                                                   regions={"Львівська"})), 1)
+                self.assertEqual(read_contacts(con, categories=set()), [])
+                self.assertEqual(read_contacts(con, regions=set()), [])
+                set_phone_status(con, repeated_phone, "Опрацьовано")
+                self.assertEqual(read_contacts(con, ("Не опрацьований",),
+                                               categories={"Генпідрядні організації"}), [])
+                self.assertEqual(len(read_contacts(con, categories={"Архітектори"})), 1)
+
     def test_copyable_phone_and_visible_link_are_exact_cell_values(self):
         row = {"name": "ТОВ Будмонтаж", "phone": "+380671234567",
                "website": "https://budmontazh.ua", "social": "https://instagram.com/build",

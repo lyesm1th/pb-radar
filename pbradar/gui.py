@@ -87,6 +87,8 @@ class App(ctk.CTk):
         self.working = False
         self.rows: dict[str, dict] = {}
         self.expanded_groups: set[str] = set()
+        self.list_categories: set[str] | None = None
+        self.list_regions: set[str] | None = None
         self.build_ui()
         self.refresh()
         self.refresh_osm_state()
@@ -242,6 +244,8 @@ class App(ctk.CTk):
                                       PANEL_RAISED, width=130, height=27, side="right")
         self.button(explanation_line, "Показати всю базу", self.show_all_contacts,
                     PANEL_RAISED, width=130, height=27, side="right")
+        self.button(explanation_line, "↻ Оновити список", self.update_list_filters,
+                    "#24528a", width=135, height=27, side="right")
 
         cols = ("mark", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
         headers = ("✓", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
@@ -413,11 +417,23 @@ class App(ctk.CTk):
 
     def show_all_contacts(self):
         """Reveal existing records without touching the source-search filters."""
+        self.list_categories = None
+        self.list_regions = None
         self.ownership_mode.set("Усі")
         self.show_prozorro.set(True)
         self.only_new.set(False)
         self.search_var.set("")
         self.change_visibility()
+
+    def update_list_filters(self):
+        """Apply category/oblast checkboxes to saved records without a new scan."""
+        categories = {name for name, var in self.cat_vars.items() if var.get()}
+        regions = {name for name, var in self.reg_vars.items() if var.get()}
+        self.list_categories = None if len(categories) == len(CATEGORIES) else categories
+        self.list_regions = None if len(regions) == len(REGIONS) else regions
+        self.refresh()
+        self.status_text.set(f"Список оновлено за вибором: напрямків {len(categories)}, "
+                             f"областей {len(regions)}. Базу номерів не змінено.")
 
     def toggle_all_groups(self):
         parents = [item for item in self.table.get_children() if self.table.get_children(item)]
@@ -605,6 +621,7 @@ class App(ctk.CTk):
             messagebox.showwarning("Фільтри", "Вибери хоча б одну категорію та область.")
             return
         all_regions = len(regions) == len(REGIONS)
+        self.update_list_filters()
 
         def work():
             if not index_is_current(source):
@@ -676,6 +693,7 @@ class App(ctk.CTk):
             if answer is None:
                 return
             resume = answer
+        self.update_list_filters()
 
         def work():
             result = scan_prozorro(
@@ -703,9 +721,17 @@ class App(ctk.CTk):
         with connect_db() as con:
             all_rows = read_contacts(con)
             source_rows = read_contacts(con, include_prozorro=self.show_prozorro.get())
+            category_rows = (source_rows if self.list_categories is None else
+                             read_contacts(con, include_prozorro=self.show_prozorro.get(),
+                                           categories=self.list_categories))
+            region_rows = (category_rows if self.list_regions is None else
+                           read_contacts(con, include_prozorro=self.show_prozorro.get(),
+                                         categories=self.list_categories, regions=self.list_regions))
         excluded_source = len(all_rows) - len(source_rows)
-        ownership_rows = filter_ownership(source_rows, self.ownership_mode.get())
-        excluded_ownership = len(source_rows) - len(ownership_rows)
+        excluded_category = len(source_rows) - len(category_rows)
+        excluded_region = len(category_rows) - len(region_rows)
+        ownership_rows = filter_ownership(region_rows, self.ownership_mode.get())
+        excluded_ownership = len(region_rows) - len(ownership_rows)
         eligible_rows = ([row for row in ownership_rows if row["status"] == "Не опрацьований"]
                          if self.only_new.get() else ownership_rows)
         excluded_status = len(ownership_rows) - len(eligible_rows)
@@ -755,7 +781,8 @@ class App(ctk.CTk):
                             f"Нові у базі: {len(all_rows) - reviewed}  ·  Опрацьовані: {reviewed}")
         hidden = len(all_rows) - len(values)
         if hidden:
-            reasons = [("джерело", excluded_source), ("тип", excluded_ownership),
+            reasons = [("джерело", excluded_source), ("напрямки", excluded_category),
+                       ("області", excluded_region), ("тип", excluded_ownership),
                        ("статус", excluded_status), ("пошук", excluded_search)]
             detail = "  ·  ".join(f"{label}: {count}" for label, count in reasons if count)
             self.filter_explanation.set(f"Приховано фільтрами {hidden} номерів ({detail}).")
@@ -886,7 +913,8 @@ class App(ctk.CTk):
         if path:
             with connect_db() as con:
                 rows = read_contacts(con, ("Не опрацьований",) if self.only_new.get() else (),
-                                     include_prozorro=self.show_prozorro.get())
+                                     include_prozorro=self.show_prozorro.get(),
+                                     categories=self.list_categories, regions=self.list_regions)
             rows = filter_ownership(rows, self.ownership_mode.get())
             rows = filter_contacts(rows, self.search_var.get())
             export_csv(Path(path), rows)
