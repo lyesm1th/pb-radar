@@ -18,8 +18,8 @@ from . import __version__
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
                    company_key, connect_db, export_csv, parse_ua_phones, read_contacts,
                    save_contact, set_phone_status)
-from .discovery import (RegionIndex, WebsiteReader, download_file,
-                        ensure_regions, read_site_numbers, resolve_osm_url)
+from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
+                        ensure_regions, read_site_numbers)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 
@@ -32,6 +32,20 @@ MUTED = "#8da0ba"
 ACCENT = "#dc2934"
 FONT = "Segoe UI"
 ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def dark_theme_logo() -> Image.Image:
+    """Keep the genuine transparent red emblem; make its black lettering white."""
+    logo = Image.open(ASSETS / "polski-bramy-logo.png").convert("RGBA")
+    logo = logo.crop((45, 56, 559, 202))
+    # The transparent PNG already has no background. The white rectangle was a
+    # UI card; replace only the dark text's RGB, preserving its exact alpha.
+    text_start = 164
+    lettering = logo.crop((text_start, 0, logo.width, logo.height))
+    white = Image.new("RGBA", lettering.size, (242, 246, 250, 0))
+    white.putalpha(lettering.getchannel("A"))
+    logo.paste(white, (text_start, 0))
+    return logo
 
 
 class App(ctk.CTk):
@@ -70,14 +84,11 @@ class App(ctk.CTk):
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=26, pady=(19, 12))
-        logo_panel = ctk.CTkFrame(top, fg_color="#ffffff", width=256, height=85, corner_radius=12)
-        logo_panel.pack(side="left")
-        logo_panel.pack_propagate(False)
-        logo_image = Image.open(ASSETS / "polski-bramy-logo.png").convert("RGBA")
-        logo_image = logo_image.crop((45, 56, 559, 202))
+        logo_image = dark_theme_logo()
         self.brand_logo = ctk.CTkImage(light_image=logo_image, dark_image=logo_image,
-                                        size=(234, 67))
-        ctk.CTkLabel(logo_panel, text="", image=self.brand_logo).pack(expand=True)
+                                        size=(250, 71))
+        ctk.CTkLabel(top, text="", image=self.brand_logo,
+                     fg_color="transparent").pack(side="left")
         heading = ctk.CTkFrame(top, fg_color="transparent")
         heading.pack(side="left", padx=17)
         ctk.CTkLabel(heading, text="Пошук публічних робочих контактів",
@@ -278,17 +289,17 @@ class App(ctk.CTk):
             return
 
         def work():
-            self.ui_event("message", "Визначаю актуальний OSM-архів усієї України…")
-            source_url = resolve_osm_url(lambda s: self.ui_event("message", s))
-            self.ui_event("message", "Завантажую OSM для всієї України…")
-            download_file(source_url, OSM_FILE, lambda s: self.ui_event("message", s),
-                          cancel=self.cancel, validate_pbf=True)
+            self.ui_event("message", "Шукаю доступне джерело OSM для всієї України…")
+            source_name = download_ukraine_osm(OSM_FILE,
+                                               progress=lambda s: self.ui_event("message", s),
+                                               cancel=self.cancel)
             self.ui_event("message", "Готую одноразовий індекс областей та організацій…")
             count = build_osm_index(OSM_FILE, RegionIndex(ensure_regions()),
                                     progress=lambda s: self.ui_event("message", s),
                                     cancel=self.cancel)
             self.custom_osm = OSM_FILE
-            return f"OSM України оновлено · індекс готовий · організацій: {count:,}. Можна шукати за областями."
+            return (f"OSM України оновлено ({source_name}) · індекс готовий · "
+                    f"організацій: {count:,}. Можна шукати за областями.")
 
         self.run_task(work)
 

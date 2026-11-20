@@ -22,6 +22,8 @@ USER_AGENT = "PB-Radar/0.1 (business contact source verification; respectful cra
 OSM_URL = "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf"
 OSM_INDEX_URL = "https://download.geofabrik.de/europe/ukraine/index.html"
 OSM_DATED_URL = "https://download.geofabrik.de/europe/ukraine/ukraine-{}.osm.pbf"
+OSM_MIRROR_URL = "https://download.openstreetmap.fr/extracts/europe/ukraine-latest.osm.pbf"
+OSM_DOWNLOAD_HOSTS = {"download.geofabrik.de", "download.openstreetmap.fr"}
 
 
 def resolve_osm_url(progress=None, now: dt.datetime | None = None) -> str:
@@ -69,6 +71,31 @@ def resolve_osm_url(progress=None, now: dt.datetime | None = None) -> str:
                        "Спробуй пізніше або вибери завантажений PBF через «Власний PBF».")
 
 
+def _open_download(url: str):
+    """Follow a few HTTPS redirects, never an unbounded redirect chain."""
+    visited = set()
+    for _ in range(5):
+        if url in visited:
+            raise ValueError("Джерело зациклює перенаправлення завантаження")
+        visited.add(url)
+        response = requests.get(url, stream=True, timeout=(15, 65), allow_redirects=False,
+                                headers={"User-Agent": USER_AGENT})
+        if not 300 <= getattr(response, "status_code", 200) < 400:
+            return response
+        next_url = urljoin(url, response.headers.get("Location", ""))
+        with response:
+            pass
+        parsed = urlparse(next_url)
+        if parsed.scheme != "https" or parsed.hostname not in OSM_DOWNLOAD_HOSTS:
+            raise ValueError("Джерело перенаправляє завантаження на неперевірений сервер")
+        if parsed.hostname == "download.geofabrik.de" and "/ukraine/ukraine/ukraine-" in parsed.path:
+            # Known rewrite regression (Nov 2026): every hop inserts another
+            # /ukraine/ directory, so skip immediately to the independent mirror.
+            raise ValueError("Geofabrik зациклює перенаправлення архіву України")
+        url = next_url
+    raise ValueError("Джерело зациклює перенаправлення завантаження")
+
+
 def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_000_000,
                   cancel: threading.Event | None = None, validate_pbf: bool = False):
     """Stream to a .partial file and atomically replace after successful completion."""
@@ -76,11 +103,7 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
     part = destination.with_suffix(destination.suffix + ".partial")
     size = 0
     try:
-        with requests.get(url, stream=True, timeout=(15, 65), allow_redirects=False,
-                          headers={"User-Agent": USER_AGENT}) as resp:
-            if 300 <= getattr(resp, "status_code", 200) < 400:
-                raise ValueError("Джерело перенаправляє завантаження. "
-                                 "Вибери актуальний архів Geofabrik або спробуй пізніше.")
+        with _open_download(url) as resp:
             resp.raise_for_status()
             declared = int(resp.headers.get("Content-Length", "0"))
             if declared > max_bytes:
@@ -108,6 +131,38 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
         part.unlink(missing_ok=True)
         raise
     return destination
+
+
+def download_ukraine_osm(destination: Path, progress=None,
+                         cancel: threading.Event | None = None) -> str:
+    """Try Geofabrik first, then an independent nationwide OSM France extract.
+
+    Both sources produce a Ukraine-wide .osm.pbf; only one local copy is kept.
+    No failed download can overwrite the previous good dataset.
+    """
+    sources = []
+    try:
+        sources.append(("Geofabrik", resolve_osm_url(progress=progress)))
+    except (RuntimeError, requests.RequestException) as exc:
+        if progress:
+            progress(f"Geofabrik недоступний ({str(exc)[:90]}). Перевіряю резервне джерело…")
+    sources.append(("OSM France", OSM_MIRROR_URL))
+    failures = []
+    for name, source in sources:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Завантаження зупинено")
+        if progress:
+            progress(f"Завантажую повну Україну · джерело: {name}…")
+        try:
+            download_file(source, destination, progress=progress, cancel=cancel, validate_pbf=True)
+            return name
+        except InterruptedError:
+            raise
+        except (OSError, requests.RequestException, ValueError) as exc:
+            failures.append(f"{name}: {str(exc)[:100]}")
+            if progress:
+                progress(f"{name} не відповідає коректно. Перемикаю джерело…")
+    raise RuntimeError("Не вдалося завантажити OSM України. " + " | ".join(failures))
 
 
 def ensure_regions(progress=None) -> dict:

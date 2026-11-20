@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pbradar.discovery import RegionIndex, download_file, ensure_regions, name_region, resolve_osm_url
+from pbradar.discovery import (OSM_MIRROR_URL, RegionIndex, download_file,
+                               download_ukraine_osm, ensure_regions, name_region, resolve_osm_url)
 from pbradar.osm_index import build_osm_index, find_indexed_leads, index_is_current
 from pbradar.osm_storage import cleanup_abandoned_download, inspect_osm
 
@@ -78,6 +79,54 @@ class IndexTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_unavailable_geofabrik_switches_to_ukraine_wide_mirror(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "ukraine.osm.pbf"
+            path.write_bytes(b"previous")
+            attempted = []
+
+            def fake_download(url, destination, **kwargs):
+                attempted.append(url)
+                if len(attempted) == 1:
+                    raise ValueError("Джерело зациклює перенаправлення")
+                destination.write_bytes(b"valid mirror data")
+
+            with patch("pbradar.discovery.resolve_osm_url",
+                       return_value="https://download.geofabrik.de/europe/ukraine/ukraine-261119.osm.pbf"), \
+                 patch("pbradar.discovery.download_file", side_effect=fake_download):
+                selected = download_ukraine_osm(path)
+            self.assertEqual(selected, "OSM France")
+            self.assertEqual(attempted[-1], OSM_MIRROR_URL)
+            self.assertEqual(path.read_bytes(), b"valid mirror data")
+
+    def test_safe_single_redirect_is_supported(self):
+        class Redirect:
+            status_code = 302
+            headers = {"Location": "https://download.geofabrik.de/europe/ukraine/ukraine-261119.osm.pbf"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                pass
+
+        class Download:
+            status_code = 200
+            headers = {"Content-Length": "3"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                pass
+            def raise_for_status(self):
+                pass
+            def iter_content(self, _):
+                yield b"new"
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "ukraine.osm.pbf"
+            with patch("pbradar.discovery.requests.get", side_effect=[Redirect(), Download()]) as get:
+                download_file("https://download.geofabrik.de/old", target)
+            self.assertEqual(target.read_bytes(), b"new")
+            self.assertEqual(get.call_count, 2)
+
     def test_direct_geofabrik_archive_is_selected_instead_of_redirecting_latest(self):
         class Listing:
             status_code = 200
@@ -120,7 +169,7 @@ class StorageTests(unittest.TestCase):
             data = Path(folder) / "ukraine-latest.osm.pbf"
             data.write_bytes(b"previous")
             with patch("pbradar.discovery.requests.get", return_value=Redirect()) as get:
-                with self.assertRaisesRegex(ValueError, "перенаправляє"):
+                with self.assertRaisesRegex(ValueError, "перенаправл"):
                     download_file("https://example.org/data", data)
             self.assertFalse(get.call_args.kwargs["allow_redirects"])
             self.assertEqual(data.read_bytes(), b"previous")
