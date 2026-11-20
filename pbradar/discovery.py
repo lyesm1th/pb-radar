@@ -19,11 +19,11 @@ from bs4 import BeautifulSoup
 from .core import BASE_DIR, REGIONS, classify, normalize_url, parse_ua_phones
 
 USER_AGENT = "PB-Radar/0.1 (business contact source verification; respectful crawler)"
-GEODATA_API = "https://www.geoboundaries.org/api/current/gbOpen/UKR/ADM1/"
 OSM_URL = "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf"
 
 
-def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_000_000):
+def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_000_000,
+                  cancel: threading.Event | None = None, validate_pbf: bool = False):
     """Stream to a .partial file and atomically replace after successful completion."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     part = destination.with_suffix(destination.suffix + ".partial")
@@ -36,6 +36,8 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
                 raise ValueError("Файл перевищує дозволений розмір")
             with part.open("wb") as out:
                 for chunk in resp.iter_content(256 * 1024):
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("Завантаження зупинено")
                     if not chunk:
                         continue
                     size += len(chunk)
@@ -44,6 +46,12 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
                     out.write(chunk)
                     if progress and size % (4 * 1024 * 1024) < len(chunk):
                         progress(f"Завантажено {size // (1024*1024)} МБ")
+        if declared and size != declared:
+            raise ValueError("Завантаження неповне: розмір не відповідає відповіді сервера")
+        if validate_pbf:
+            with part.open("rb") as check:
+                if b"OSMHeader" not in check.read(128):
+                    raise ValueError("Замість OSM PBF отримано некоректний файл. Попередні дані збережено.")
         part.replace(destination)
     except Exception:
         part.unlink(missing_ok=True)
@@ -52,16 +60,10 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
 
 
 def ensure_regions(progress=None) -> dict:
-    saved = BASE_DIR / "cache" / "ukraine-adm1.geojson"
-    if not saved.exists():
-        r = requests.get(GEODATA_API, timeout=20, headers={"User-Agent": USER_AGENT})
-        r.raise_for_status()
-        url = r.json().get("simplifiedGeometryGeoJSON")
-        if not url or not url.startswith("https://"):
-            raise ValueError("Немає доступної геометрії областей")
-        if progress:
-            progress("Отримую межі областей…")
-        download_file(url, saved, max_bytes=20_000_000)
+    """Read bundled ADM1 polygons. No network or external service is needed."""
+    saved = Path(__file__).resolve().parent / "assets" / "ukraine-adm1.geojson"
+    if progress:
+        progress("Межі областей доступні локально")
     with saved.open(encoding="utf-8") as handle:
         return json.load(handle)
 
@@ -83,6 +85,8 @@ TRANSLIT = {
 
 def name_region(value: str) -> str:
     name = value.strip().lower()
+    if name in ("kyiv", "kiev", "київ", "м. київ"):
+        return "м. Київ"
     for region in REGIONS:
         if region.lower() in name:
             return region
@@ -129,11 +133,18 @@ class RegionIndex:
                 polygons = geom.get("coordinates", [])
             else:
                 continue
-            self.items.append((name, polygons))
+            bounds = []
+            for polygon in polygons:
+                positions = [point for ring in polygon for point in ring]
+                if positions:
+                    bounds.append((min(p[0] for p in positions), min(p[1] for p in positions),
+                                   max(p[0] for p in positions), max(p[1] for p in positions)))
+            self.items.append((name, polygons, bounds))
 
     def at(self, lon: float, lat: float) -> str:
-        for name, polygons in self.items:
-            if any(polygon_contains(lon, lat, p) for p in polygons):
+        for name, polygons, bounds in self.items:
+            if any(box[0] <= lon <= box[2] and box[1] <= lat <= box[3] and
+                   polygon_contains(lon, lat, p) for p, box in zip(polygons, bounds)):
                 return name
         return "Не визначено"
 

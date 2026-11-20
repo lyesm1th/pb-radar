@@ -1,4 +1,4 @@
-"""Windows-first Tkinter desktop UI for on-demand nationwide contact discovery."""
+"""Windows-first dark desktop dashboard for nationwide public business contacts."""
 
 from __future__ import annotations
 
@@ -11,115 +11,136 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import customtkinter as ctk
+
 from . import __version__
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
-                   connect_db, export_csv, parse_ua_phones, read_contacts,
+                   company_key, connect_db, export_csv, parse_ua_phones, read_contacts,
                    save_contact, set_phone_status)
 from .discovery import (OSM_URL, RegionIndex, WebsiteReader, download_file,
-                        ensure_regions, find_osm_leads, read_site_numbers)
+                        ensure_regions, read_site_numbers)
+from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
+from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 
-OSM_FILE = BASE_DIR / "cache" / "ukraine-latest.osm.pbf"
 STATUSES = CONTACT_STATUSES
+BG = "#090f1c"
+PANEL = "#121d30"
+PANEL_RAISED = "#182740"
+TEXT = "#eaf0fa"
+MUTED = "#8da0ba"
+ACCENT = "#2bd4bd"
+FONT = "Segoe UI"
 
 
-class App(tk.Tk):
+class App(ctk.CTk):
     def __init__(self):
+        ctk.set_appearance_mode("dark")
         super().__init__()
         self.title(f"PB Radar {__version__} · Пошук контактів")
-        self.geometry("1190x790")
-        self.minsize(950, 680)
-        self.configure(bg="#0b1220")
+        self.geometry("1340x880")
+        self.minsize(1050, 735)
+        self.configure(fg_color=BG)
+        cleanup_abandoned_download(OSM_FILE)
+        cleanup_abandoned_download(INDEX_FILE)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.working = False
         self.rows: dict[str, dict] = {}
         self.build_ui()
         self.refresh()
+        self.refresh_osm_state()
         self.after(150, self.poll)
 
     def build_ui(self):
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("Treeview", background="#f8fafc", fieldbackground="#f8fafc", foreground="#15243a",
-                        rowheight=28, font=("Segoe UI", 9), borderwidth=0)
-        style.configure("Treeview.Heading", background="#dfe7f1", foreground="#1b3455",
-                        font=("Segoe UI Semibold", 9))
-        style.map("Treeview", background=[("selected", "#d7e8ff")], foreground=[("selected", "#142237")])
+        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
+                        rowheight=33, font=(FONT, 10), borderwidth=0, relief="flat")
+        style.configure("Treeview.Heading", background=PANEL_RAISED, foreground="#cbd8ec",
+                        font=(FONT, 10, "bold"), relief="flat", padding=(6, 9))
+        style.map("Treeview", background=[("selected", "#275a73")], foreground=[("selected", "#ffffff")])
+        style.map("Treeview.Heading", background=[("active", "#253957")])
 
-        top = tk.Frame(self, bg="#0b1220")
-        top.pack(fill="x", padx=22, pady=(20, 12))
-        tk.Label(top, text="PB  /  RADAR", fg="#ffffff", bg="#0b1220",
-                 font=("Segoe UI Semibold", 23)).pack(side="left")
-        tk.Label(top, text="Пошук публічних робочих телефонів · Україна",
-                 fg="#a6b7cf", bg="#0b1220", font=("Segoe UI", 11)).pack(side="left", padx=22)
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=26, pady=(19, 12))
+        logo = ctk.CTkFrame(top, fg_color=ACCENT, width=47, height=47, corner_radius=13)
+        logo.pack(side="left")
+        logo.pack_propagate(False)
+        ctk.CTkLabel(logo, text="PB", text_color=BG, font=(FONT, 18, "bold")).pack(expand=True)
+        heading = ctk.CTkFrame(top, fg_color="transparent")
+        heading.pack(side="left", padx=14)
+        ctk.CTkLabel(heading, text="RADAR", text_color=TEXT, font=(FONT, 26, "bold")).pack(anchor="w")
+        ctk.CTkLabel(heading, text="Публічні робочі контакти · Вся Україна", text_color=MUTED,
+                     font=(FONT, 11)).pack(anchor="w")
+        self.osm_badge = ctk.CTkLabel(top, text="OSM · перевірка…", text_color=ACCENT,
+                                      fg_color=PANEL_RAISED, corner_radius=12, height=34,
+                                      font=(FONT, 11, "bold"))
+        self.osm_badge.pack(side="right", padx=(12, 0))
+        ctk.CTkLabel(top, text=f"Версія {__version__}", text_color=MUTED,
+                     font=(FONT, 11)).pack(side="right")
 
-        filters = tk.Frame(self, bg="#142239", padx=14, pady=12)
-        filters.pack(fill="x", padx=22)
-        cframe = tk.Frame(filters, bg="#142239")
-        cframe.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        rframe = tk.Frame(filters, bg="#142239")
-        rframe.pack(side="left", fill="both", expand=True)
-        for frame, label in ((cframe, "КАТЕГОРІЇ"), (rframe, "ОБЛАСТІ")):
-            tk.Label(frame, text=label, bg="#142239", fg="#a8bdde",
-                     font=("Segoe UI Semibold", 10)).pack(anchor="w", pady=(0, 7))
-        self.cat_list = tk.Listbox(cframe, selectmode="multiple", height=8, exportselection=False,
-                                   bg="#1e3453", fg="#eef5ff", selectbackground="#3a81db",
-                                   font=("Segoe UI", 10), borderwidth=0, highlightthickness=0)
-        self.reg_list = tk.Listbox(rframe, selectmode="multiple", height=8, exportselection=False,
-                                   bg="#1e3453", fg="#eef5ff", selectbackground="#3a81db",
-                                   font=("Segoe UI", 10), borderwidth=0, highlightthickness=0)
-        for value in CATEGORIES:
-            self.cat_list.insert("end", value)
-        for value in REGIONS:
-            self.reg_list.insert("end", value)
-        for box, frame in ((self.cat_list, cframe), (self.reg_list, rframe)):
-            box.pack(fill="both", expand=True)
-            box.selection_set(0, "end")
-            buttons = tk.Frame(frame, bg="#142239")
-            buttons.pack(anchor="e", pady=(5, 0))
-            self.small_button(buttons, "Усі", lambda l=box: l.selection_set(0, "end"))
-            self.small_button(buttons, "Очистити", lambda l=box: l.selection_clear(0, "end"))
+        filters = ctk.CTkFrame(self, fg_color="transparent")
+        filters.pack(fill="x", padx=26, pady=(0, 12))
+        filters.grid_columnconfigure((0, 1), weight=1, uniform="filters")
+        self.cat_vars = self._filter_panel(filters, 0, "НАПРЯМКИ РОБОТИ", CATEGORIES)
+        self.reg_vars = self._filter_panel(filters, 1, "ГЕОГРАФІЯ ПОШУКУ", REGIONS)
 
-        toolbar = tk.Frame(self, bg="#0b1220")
-        toolbar.pack(fill="x", padx=22, pady=(12, 10))
-        self.start_btn = self.button(toolbar, "▶  ПОЧАТИ ПОШУК", self.start_search, "#34a77a")
-        self.stop_btn = self.button(toolbar, "Зупинити", self.stop_search, "#394e68")
-        self.source_btn = self.button(toolbar, "Джерело OSM", self.choose_source, "#294c77")
-        self.download_btn = self.button(toolbar, "Завантажити дані України", self.download_osm, "#294c77")
-        self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, "#294c77")
-        self.export_btn = self.button(toolbar, "Експорт CSV", self.export, "#294c77")
-        self.status_text = tk.StringVar(value="Готово до пошуку · джерело OSM не завантажено" if not OSM_FILE.exists() else "Готово до пошуку")
-        tk.Label(self, textvariable=self.status_text, bg="#0b1220", fg="#a8bdde",
-                 font=("Segoe UI", 10), anchor="w").pack(fill="x", padx=22, pady=(0, 9))
+        toolbar = ctk.CTkFrame(self, fg_color="transparent")
+        toolbar.pack(fill="x", padx=26, pady=(0, 9))
+        self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT, dark_text=True)
+        self.stop_btn = self.button(toolbar, "■   Зупинити", self.stop_search, PANEL_RAISED)
+        self.download_btn = self.button(toolbar, "↓   Завантажити / оновити OSM", self.download_osm, "#24528a")
+        self.source_btn = self.button(toolbar, "Власний PBF", self.choose_source, PANEL_RAISED)
+        self.export_btn = self.button(toolbar, "Експорт CSV", self.export, PANEL_RAISED, side="right")
+        self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, PANEL_RAISED, side="right")
 
-        panel = tk.Frame(self, bg="#f8fafc", padx=10, pady=10)
-        panel.pack(fill="both", expand=True, padx=22, pady=(0, 20))
-        line = tk.Frame(panel, bg="#f8fafc")
-        line.pack(fill="x", pady=(0, 8))
-        self.count_text = tk.StringVar(value="Контакти: 0")
-        tk.Label(line, textvariable=self.count_text, bg="#f8fafc", fg="#17304f",
-                 font=("Segoe UI Semibold", 12)).pack(side="left")
+        status = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12, height=62)
+        status.pack(fill="x", padx=26, pady=(0, 12))
+        status.pack_propagate(False)
+        self.status_text = tk.StringVar(value="Готово. Завантажте OSM усієї України для першого пошуку.")
+        ctk.CTkLabel(status, textvariable=self.status_text, text_color=TEXT,
+                     font=(FONT, 11), anchor="w").pack(fill="x", padx=15, pady=(8, 0))
+        self.progress = ctk.CTkProgressBar(status, height=4, mode="indeterminate",
+                                          fg_color="#20334c", progress_color=ACCENT)
+        self.progress.pack(fill="x", padx=15, pady=(6, 0))
+        self.progress.set(0)
+        self.osm_detail = ctk.CTkLabel(status, text="", text_color=MUTED, font=(FONT, 10), anchor="w")
+        self.osm_detail.pack(fill="x", padx=15, pady=(3, 0))
+
+        panel = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=15)
+        panel.pack(fill="both", expand=True, padx=26, pady=(0, 18))
+        line = ctk.CTkFrame(panel, fg_color="transparent")
+        line.pack(fill="x", padx=16, pady=(13, 10))
+        self.count_text = tk.StringVar(value="Контактів: 0")
+        ctk.CTkLabel(line, textvariable=self.count_text, text_color=TEXT,
+                     font=(FONT, 14, "bold")).pack(side="left")
         self.only_new = tk.BooleanVar(value=True)
-        tk.Checkbutton(line, text="Лише не опрацьовані", variable=self.only_new,
-                       command=self.refresh, bg="#f8fafc", fg="#17304f").pack(side="left", padx=20)
-        tk.Label(line, text="Статус вибраного:", bg="#f8fafc", fg="#17304f").pack(side="right", padx=8)
-        self.status_box = ttk.Combobox(line, state="readonly", values=STATUSES, width=24)
+        ctk.CTkSwitch(line, text="Лише нові", variable=self.only_new,
+                      command=self.refresh, progress_color=ACCENT,
+                      button_color="#d5fdf6", font=(FONT, 11)).pack(side="left", padx=22)
+        self.status_box = ctk.CTkOptionMenu(line, values=list(STATUSES), command=self.change_status,
+                                             fg_color="#233a58", button_color="#2d5b81",
+                                             button_hover_color="#3975a6", width=226,
+                                             font=(FONT, 11), dropdown_font=(FONT, 11))
         self.status_box.set(STATUSES[0])
         self.status_box.pack(side="right")
-        self.status_box.bind("<<ComboboxSelected>>", self.change_status)
+        ctk.CTkLabel(line, text="Статус номера", text_color=MUTED,
+                     font=(FONT, 11)).pack(side="right", padx=(0, 10))
 
         cols = ("mark", "name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
         headers = ("✓", "Компанія", "Категорія", "Область", "Телефон", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
         widths = (45, 170, 150, 115, 145, 105, 150, 145, 130, 170)
-        self.table = ttk.Treeview(panel, columns=cols, show="headings", selectmode="browse")
+        table_box = tk.Frame(panel, bg=PANEL, highlightthickness=0)
+        table_box.pack(fill="both", expand=True, padx=12)
+        self.table = ttk.Treeview(table_box, columns=cols, show="headings", selectmode="browse")
         for col, title, width in zip(cols, headers, widths):
             self.table.heading(col, text=title)
             self.table.column(col, width=width, minwidth=40 if col == "mark" else 90,
                               anchor="center" if col == "mark" else "w",
                               stretch=(col in ("name", "website")))
-        vert = ttk.Scrollbar(panel, orient="vertical", command=self.table.yview)
-        hor = ttk.Scrollbar(panel, orient="horizontal", command=self.table.xview)
+        vert = ttk.Scrollbar(table_box, orient="vertical", command=self.table.yview)
+        hor = ttk.Scrollbar(table_box, orient="horizontal", command=self.table.xview)
         self.table.configure(yscrollcommand=vert.set, xscrollcommand=hor.set)
         vert.pack(side="right", fill="y")
         hor.pack(side="bottom", fill="x")
@@ -127,21 +148,55 @@ class App(tk.Tk):
         self.table.bind("<ButtonRelease-1>", self.toggle_from_click)
         self.table.bind("<<TreeviewSelect>>", self.sync_status)
         self.table.bind("<Double-1>", self.open_selected)
-        tk.Label(panel, text="Клік по ☐/☑ — позначити номер. Щоб переглянути вже опрацьовані, зніми фільтр. Подвійний клік по номеру — копіювати.",
-                 fg="#657995", bg="#f8fafc", font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(panel, text="☐ / ☑ — змінити статус  ·  Двічі на номер — копіювати  ·  Двічі на рядок — відкрити джерело",
+                     text_color=MUTED, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(5, 9))
+
+    def _filter_panel(self, parent, column, title, options):
+        card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=15)
+        card.grid(row=0, column=column, sticky="nsew", padx=(0, 6) if column == 0 else (6, 0))
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(head, text=title, text_color=TEXT, font=(FONT, 12, "bold")).pack(side="left")
+        variables = {name: tk.BooleanVar(value=True) for name in options}
+        self.button(head, "Усі", lambda: self._set_filters(variables, True), PANEL_RAISED,
+                    width=46, height=27, side="right")
+        self.button(head, "Очистити", lambda: self._set_filters(variables, False), PANEL_RAISED,
+                    width=76, height=27, side="right")
+        box = ctk.CTkScrollableFrame(card, height=174, fg_color="#0d1727", corner_radius=9,
+                                      scrollbar_button_color="#29445f")
+        box.pack(fill="x", padx=12, pady=(0, 12))
+        box.grid_columnconfigure((0, 1), weight=1)
+        for i, (name, var) in enumerate(variables.items()):
+            ctk.CTkCheckBox(box, text=name, variable=var, width=22, height=24,
+                            checkbox_width=17, checkbox_height=17, corner_radius=5,
+                            fg_color=ACCENT, hover_color="#2aaea1", border_color="#4d627d",
+                            text_color="#dce8f6", font=(FONT, 11)).grid(
+                                row=i // 2, column=i % 2, sticky="w", padx=(7, 3), pady=5)
+        return variables
 
     @staticmethod
-    def small_button(parent, label, action):
-        tk.Button(parent, text=label, command=action, fg="#d7e7fc", bg="#263f62",
-                  relief="flat", padx=7).pack(side="left", padx=3)
+    def _set_filters(variables, value):
+        for variable in variables.values():
+            variable.set(value)
 
     @staticmethod
-    def button(parent, label, action, color):
-        btn = tk.Button(parent, text=label, command=action, bg=color, fg="white",
-                        relief="flat", activeforeground="white", padx=11, pady=8,
-                        font=("Segoe UI Semibold", 9), cursor="hand2")
-        btn.pack(side="left", padx=(0, 7))
+    def button(parent, label, action, color, *, dark_text=False, width=110, height=37, side="left"):
+        btn = ctk.CTkButton(parent, text=label, command=action, fg_color=color,
+                            text_color=BG if dark_text else TEXT,
+                            hover_color="#20ad9b" if dark_text else "#315174",
+                            font=(FONT, 11, "bold"), corner_radius=10,
+                            height=height, width=width)
+        btn.pack(side=side, padx=(0, 7))
         return btn
+
+    def refresh_osm_state(self):
+        source = getattr(self, "custom_osm", OSM_FILE)
+        state = inspect_osm(source)
+        text = "OSM · " + state.status
+        if index_is_current(source, INDEX_FILE):
+            text += " · індекс ✓"
+        self.osm_badge.configure(text="   " + text + "   ", text_color=state.color)
+        self.osm_detail.configure(text=state.description + "  ·  Один файл України + швидкий індекс")
 
     def ui_event(self, kind, value):
         self.events.put((kind, value))
@@ -158,11 +213,20 @@ class App(tk.Tk):
                     self.working = False
                     self.start_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
+                    self.source_btn.configure(state="normal")
+                    self.progress.stop()
+                    self.progress.set(0)
                     self.status_text.set(value)
+                    self.refresh_osm_state()
                 elif kind == "error":
                     self.working = False
                     self.start_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
+                    self.source_btn.configure(state="normal")
+                    self.progress.stop()
+                    self.progress.set(0)
+                    self.status_text.set(value)
+                    self.refresh_osm_state()
                     messagebox.showerror("PB Radar", value)
         except queue.Empty:
             pass
@@ -175,6 +239,8 @@ class App(tk.Tk):
         self.cancel.clear()
         self.start_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
+        self.source_btn.configure(state="disabled")
+        self.progress.start()
 
         def runner():
             try:
@@ -193,17 +259,28 @@ class App(tk.Tk):
         if filename:
             self.custom_osm = Path(filename)
             self.status_text.set(f"Джерело: {filename}")
+            self.refresh_osm_state()
 
     def download_osm(self):
-        if not messagebox.askyesno("Початкові дані", "Завантажити відкриті дані OSM для України (~850 МБ)?\nЦе потрібно лише один раз, пізніше можна оновити файл."):
+        if not messagebox.askyesno("OSM · вся Україна", "Завантажити актуальний OSM-файл для всієї України (~1 ГБ)?\n\nПісля завантаження радар один раз створить швидкий індекс областей. При оновленні старий файл буде замінено, без накопичення копій."):
             return
-        self.run_task(lambda: (download_file(OSM_URL, OSM_FILE,
-                                            lambda s: self.ui_event("message", s)),
-                               "Дані України завантажено. Можна запускати пошук.")[1])
+
+        def work():
+            self.ui_event("message", "Завантажую OSM для всієї України…")
+            download_file(OSM_URL, OSM_FILE, lambda s: self.ui_event("message", s),
+                          cancel=self.cancel, validate_pbf=True)
+            self.ui_event("message", "Готую одноразовий індекс областей та організацій…")
+            count = build_osm_index(OSM_FILE, RegionIndex(ensure_regions()),
+                                    progress=lambda s: self.ui_event("message", s),
+                                    cancel=self.cancel)
+            self.custom_osm = OSM_FILE
+            return f"OSM України оновлено · індекс готовий · організацій: {count:,}. Можна шукати за областями."
+
+        self.run_task(work)
 
     def start_search(self):
-        categories = {CATEGORIES[i] for i in self.cat_list.curselection()}
-        regions = {REGIONS[i] for i in self.reg_list.curselection()}
+        categories = {name for name, var in self.cat_vars.items() if var.get()}
+        regions = {name for name, var in self.reg_vars.items() if var.get()}
         source = getattr(self, "custom_osm", OSM_FILE)
         if not source.exists():
             messagebox.showinfo("Потрібне джерело", "Спочатку завантаж дані України або вибери локальний OSM PBF файл.")
@@ -214,27 +291,35 @@ class App(tk.Tk):
         all_regions = len(regions) == len(REGIONS)
 
         def work():
-            self.ui_event("message", "Підготовка меж областей…")
-            try:
-                index = RegionIndex(ensure_regions(lambda m: self.ui_event("message", m)))
-            except Exception:
-                if not all_regions:
-                    raise RuntimeError("Межі областей недоступні. Для вибраних областей потрібне підключення до geoBoundaries.")
-                index = RegionIndex({"features": []})
-            self.ui_event("message", "Пошук організацій у відкритих даних України…")
-            leads = find_osm_leads(source, categories, set() if all_regions else regions,
-                                   index, progress=lambda m: self.ui_event("message", m),
-                                   cancel=self.cancel)
+            if not index_is_current(source):
+                self.ui_event("message", "Вперше індексую OSM усієї України · це може тривати кілька хвилин…")
+                build_osm_index(source, RegionIndex(ensure_regions()),
+                                progress=lambda s: self.ui_event("message", s), cancel=self.cancel)
+            self.ui_event("message", "Вибираю організації з локального індексу…")
+            leads = find_indexed_leads(source, categories, set() if all_regions else regions)
             reader = WebsiteReader()
             checked_websites: dict[str, tuple[dict[str, str], str]] = {}
             found, new_count = 0, 0
             with connect_db() as con:
+                already_checked = {
+                    row[0]: row[1] for row in con.execute(
+                        "SELECT company_key, checked_at FROM companies WHERE checked_at != ''")
+                }
                 for pos, lead in enumerate(leads, 1):
                     if self.cancel.is_set():
                         raise InterruptedError()
                     numbers = {num: lead["source_url"] for num in lead["phones"]}
                     activity = "Невідомо"
-                    if lead["website"] and len(checked_websites) < 120:
+                    key = company_key(lead["name"], lead["website"], lead["region"])
+                    last_check = already_checked.get(key, "")
+                    recently_processed = False
+                    if last_check:
+                        try:
+                            recently_processed = (dt.datetime.now(dt.timezone.utc) -
+                                                  dt.datetime.fromisoformat(last_check)).days < 7
+                        except ValueError:
+                            pass
+                    if lead["website"] and not recently_processed and len(checked_websites) < 120:
                         website = lead["website"]
                         if website not in checked_websites:
                             checked_websites[website] = read_site_numbers(website, reader)
@@ -266,15 +351,18 @@ class App(tk.Tk):
         for id_ in self.table.get_children():
             self.table.delete(id_)
         self.rows = {}
-        for row in values:
+        for position, row in enumerate(values):
             id_ = str(row["id"])
             self.rows[id_] = row
             values_for_row = ("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
                 row.get(k, "") for k in
                 ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website"))
-            self.table.insert("", "end", iid=id_, values=values_for_row)
+            self.table.insert("", "end", iid=id_, values=values_for_row,
+                              tags=("even" if position % 2 == 0 else "odd",))
+        self.table.tag_configure("even", background=PANEL)
+        self.table.tag_configure("odd", background="#17253a")
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
-        self.count_text.set(f"До опрацювання: {len(all_rows) - reviewed}  ·  Опрацьовано: {reviewed}")
+        self.count_text.set(f"Нові: {len(all_rows) - reviewed}    ·    Опрацьовані: {reviewed}    ·    Усього: {len(all_rows)}")
 
     def sync_status(self, _event=None):
         selected = self.table.selection()
