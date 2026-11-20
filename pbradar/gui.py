@@ -230,6 +230,11 @@ class App(ctk.CTk):
                 kind, value = self.events.get_nowait()
                 if kind == "message":
                     self.status_text.set(value)
+                elif kind == "index_progress":
+                    processed, total = value
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate")
+                    self.progress.set(min(1.0, processed / total) if total else 1.0)
                 elif kind == "refresh":
                     self.refresh()
                 elif kind == "done":
@@ -263,6 +268,7 @@ class App(ctk.CTk):
         self.start_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
         self.source_btn.configure(state="disabled")
+        self.progress.configure(mode="indeterminate")
         self.progress.start()
 
         def runner():
@@ -296,7 +302,8 @@ class App(ctk.CTk):
             self.ui_event("message", "Готую одноразовий індекс областей та організацій…")
             count = build_osm_index(OSM_FILE, RegionIndex(ensure_regions()),
                                     progress=lambda s: self.ui_event("message", s),
-                                    cancel=self.cancel)
+                                    cancel=self.cancel,
+                                    on_progress=lambda done, total: self.ui_event("index_progress", (done, total)))
             self.custom_osm = OSM_FILE
             return (f"OSM України оновлено ({source_name}) · індекс готовий · "
                     f"організацій: {count:,}. Можна шукати за областями.")
@@ -319,7 +326,8 @@ class App(ctk.CTk):
             if not index_is_current(source):
                 self.ui_event("message", "Вперше індексую OSM усієї України · це може тривати кілька хвилин…")
                 build_osm_index(source, RegionIndex(ensure_regions()),
-                                progress=lambda s: self.ui_event("message", s), cancel=self.cancel)
+                                progress=lambda s: self.ui_event("message", s), cancel=self.cancel,
+                                on_progress=lambda done, total: self.ui_event("index_progress", (done, total)))
             self.ui_event("message", "Вибираю організації з локального індексу…")
             leads = find_indexed_leads(source, categories, set() if all_regions else regions)
             reader = WebsiteReader()

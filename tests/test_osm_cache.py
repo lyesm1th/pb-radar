@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 from pbradar.discovery import (OSM_MIRROR_URL, RegionIndex, download_file,
                                download_ukraine_osm, ensure_regions, name_region, resolve_osm_url)
-from pbradar.osm_index import build_osm_index, find_indexed_leads, index_is_current
+from pbradar.osm_index import (build_osm_index, count_osm_objects,
+                               find_indexed_leads, index_is_current)
 from pbradar.osm_storage import cleanup_abandoned_download, inspect_osm
 
 
@@ -39,6 +40,32 @@ class OfflineBoundariesTests(unittest.TestCase):
 
 
 class IndexTests(unittest.TestCase):
+    def test_exact_total_counts_nodes_ways_and_relations(self):
+        sample = OSM_SAMPLE.replace("</osm>", '''<way id="3" version="1">
+          <nd ref="1"/><nd ref="2"/>
+          <tag k="highway" v="service"/>
+          </way>
+          <relation id="4" version="1">
+          <member type="way" ref="3" role="outer"/>
+          <tag k="type" v="multipolygon"/>
+          </relation></osm>''')
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "ukraine.osm"
+            source.write_text(sample, encoding="utf-8")
+            self.assertEqual(count_osm_objects(source), (2, 1, 1))
+            updates = []
+            db = Path(folder) / "index.sqlite3"
+            count = build_osm_index(source, RegionIndex(ensure_regions()), db_path=db,
+                                    on_progress=lambda done, total: updates.append((done, total)))
+            self.assertEqual(count, 2)
+            self.assertEqual(updates[0], (0, 4))
+            self.assertEqual(updates[-1], (4, 4))
+            import sqlite3
+            with sqlite3.connect(db) as con:
+                metadata = dict(con.execute("SELECT key, value FROM meta"))
+            self.assertEqual(metadata["total_objects"], "4")
+            self.assertEqual(metadata["relevant_candidates"], "2")
+
     def test_reuse_and_region_filter_without_rescan(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "ukraine.osm"
