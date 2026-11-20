@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import sys
 import queue
 import threading
 import tkinter as tk
@@ -15,6 +16,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from . import __version__
+from .branding import red_mark_icon
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
                    connect_db, export_csv, mark_site_checked, parse_ua_phones,
                    read_contacts, save_contact, set_phone_status, site_needs_check)
@@ -56,10 +58,20 @@ class App(ctk.CTk):
         self.geometry("1340x880")
         self.minsize(1050, 735)
         self.configure(fg_color=BG)
-        mark = Image.open(ASSETS / "pb-radar-icon.png").convert("RGBA")
-        mark = mark.resize((64, 64), Image.Resampling.LANCZOS)
+        mark = red_mark_icon(64)
         self.window_icon = ImageTk.PhotoImage(mark, master=self)
         self.iconphoto(True, self.window_icon)
+        if sys.platform.startswith("win"):
+            # CustomTkinter overwrites `iconphoto()` with its own blue icon
+            # 200 ms after CTk.__init__ unless iconbitmap() has been called.
+            # The packaged ICO both sets the native icon and blocks that reset.
+            ico = ASSETS / "PB-Radar.ico"
+            if ico.is_file():
+                self.iconbitmap(str(ico))
+            else:
+                # Source-only run without a pre-built ICO: restore our icon
+                # after the delayed CustomTkinter callback.
+                self.after(250, lambda: self.iconphoto(True, self.window_icon))
         cleanup_abandoned_download(OSM_FILE)
         cleanup_abandoned_download(INDEX_FILE)
         self.events = queue.Queue()

@@ -2,20 +2,23 @@ import unittest
 from pathlib import Path
 
 from PIL import Image
+from pbradar.branding import red_mark_icon
 from pbradar.gui import dark_theme_logo
 
 
 class BrandingTests(unittest.TestCase):
-    def test_windows_shortcut_uses_requested_red_mark_on_dark_background(self):
+    def test_windows_shortcut_uses_only_red_mark_on_transparent_background(self):
         icon_path = Path(__file__).resolve().parents[1] / "pbradar" / "assets" / "pb-radar-icon.png"
         with Image.open(icon_path) as icon:
             self.assertEqual(icon.size, (94, 92))
-            bg = icon.getpixel((0, 0))
-            self.assertLess(max(bg), 45)
-            self.assertLess(max(bg) - min(bg), 35)
-            reds = sum(count for count, (r, g, b) in icon.convert("RGB").getcolors(94 * 92)
-                       if r > 90 and r > 1.7 * g and r > 1.7 * b)
-            self.assertGreater(reds, 250)
+        mark = red_mark_icon(256)
+        self.assertEqual(mark.mode, "RGBA")
+        self.assertEqual(mark.size, (256, 256))
+        self.assertEqual(mark.getpixel((0, 0))[3], 0)
+        self.assertEqual(mark.getpixel((255, 255))[3], 0)
+        red_pixels = sum(count for count, (r, g, b, a) in mark.getcolors(256 * 256)
+                         if a > 200 and r > 150 and r > g * 2 and r > b * 2)
+        self.assertGreater(red_pixels, 1200)
 
     def test_logo_is_transparent_and_readable_on_dark_header(self):
         logo = dark_theme_logo()
