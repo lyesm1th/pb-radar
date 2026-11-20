@@ -35,6 +35,20 @@ def archive_with_file(filename="PB-Radar.exe", contents=b"demo binary"):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_installed_launcher_uses_persistent_user_data_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / "PB-Radar"
+            with patch.object(launcher, "BASE_DIR", base), \
+                 patch.object(launcher, "VERSIONS", base / "versions"), \
+                 patch.object(launcher, "OSM_FILE", base / "cache" / "ukraine-latest.osm.pbf"):
+                launcher.ensure_data_directories()
+                self.assertTrue((base / "cache").is_dir())
+                self.assertTrue((base / "versions").is_dir())
+                osm = base / "cache" / "ukraine-latest.osm.pbf"
+                osm.write_bytes(b"already downloaded nationwide OSM")
+                launcher.ensure_data_directories()
+                self.assertEqual(osm.read_bytes(), b"already downloaded nationwide OSM")
+
     def test_install_verify_and_preserve_rollback(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder)

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import requests
 
 from .core import BASE_DIR
+from .osm_storage import OSM_FILE
 
 REPOSITORY = "lyesm1th/pb-radar"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
@@ -29,6 +30,13 @@ RELEASE_ASSET = "PB-Radar-App.zip"
 APP_FILENAME = "PB-Radar.exe"
 VERSIONS = BASE_DIR / "versions"
 CURRENT = BASE_DIR / "current.json"
+
+
+def ensure_data_directories() -> None:
+    """Persistent per-user data lives outside the installed launcher folder."""
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    OSM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VERSIONS.mkdir(parents=True, exist_ok=True)
 
 
 def safe_version(value: str) -> str:
@@ -150,11 +158,12 @@ class Launcher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PB Radar · Launcher")
-        self.geometry("540x350")
+        self.geometry("540x405")
         self.resizable(False, False)
         self.configure(bg="#0b1220")
         self.info = None
         self.busy = False
+        ensure_data_directories()
 
         tk.Label(self, text="PB  /  RADAR", fg="#ffffff", bg="#0b1220",
                  font=("Segoe UI Semibold", 29)).pack(pady=(36, 5))
@@ -172,7 +181,19 @@ class Launcher(tk.Tk):
         self.secondary.pack(pady=(12, 0))
         tk.Button(self, text="Повернути попередню версію", command=self.rollback,
                   bg="#0b1220", fg="#88a6c9", relief="flat").pack(pady=(7, 0))
+        tk.Button(self, text="📁  Відкрити папку даних / OSM", command=self.open_data_folder,
+                  bg="#0b1220", fg="#9db4d2", relief="flat").pack(pady=(12, 0))
         self.after(100, self.check)
+
+    def open_data_folder(self):
+        ensure_data_directories()
+        try:
+            if os.name == "nt":
+                os.startfile(str(BASE_DIR))
+            else:
+                subprocess.Popen(["xdg-open", str(BASE_DIR)])
+        except OSError as exc:
+            messagebox.showerror("Не вдалося відкрити папку", str(exc))
 
     def run_async(self, operation):
         if self.busy:
