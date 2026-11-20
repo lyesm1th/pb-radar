@@ -267,6 +267,7 @@ def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regio
 
     class Handler(osmium.SimpleHandler):
         seen = 0
+        scanned = 0
 
         def _process(self, obj, region: str):
             if cancel and cancel.is_set():
@@ -299,8 +300,24 @@ def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regio
                 progress(f"Відібрано {len(matches)} з {self.seen} знайдених організацій")
 
         def node(self, node):
-            if node.location.valid():
-                self._process(node, regions.at(node.location.lon, node.location.lat))
+            self.scanned += 1
+            if self.scanned % 200_000 == 0:
+                if cancel and cancel.is_set():
+                    raise InterruptedError("Пошук зупинено")
+                if progress:
+                    progress(f"Перевірено {self.scanned:,} картографічних об'єктів · кандидатів: {self.seen}")
+            if not node.location.valid():
+                return
+            name = node.tags.get("name")
+            if not name:
+                return
+            # Important for the 800+ MB Ukraine extract: point-in-polygon is
+            # expensive. Only calculate oblasts for relevant business POIs.
+            small_tags = {field: node.tags.get(field, "") for field in
+                          ("description", "office", "craft", "name:en")}
+            if not (classify(name, small_tags) & selected_categories):
+                return
+            self._process(node, regions.at(node.location.lon, node.location.lat))
 
         def way(self, way):
             tags = dict(way.tags)
