@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pbradar.discovery import RegionIndex, download_file, ensure_regions, name_region
+from pbradar.discovery import RegionIndex, download_file, ensure_regions, name_region, resolve_osm_url
 from pbradar.osm_index import build_osm_index, find_indexed_leads, index_is_current
 from pbradar.osm_storage import cleanup_abandoned_download, inspect_osm
 
@@ -78,6 +78,53 @@ class IndexTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_direct_geofabrik_archive_is_selected_instead_of_redirecting_latest(self):
+        class Listing:
+            status_code = 200
+            text = '''<a href="https://download.geofabrik.de/europe/ukraine/ukraine-latest.osm.pbf">latest</a>
+                      <a href="ukraine-261118.osm.pbf">older</a>
+                      <a href="ukraine-261119.osm.pbf">newer</a>'''
+
+        with patch("pbradar.discovery.requests.get", return_value=Listing()) as get:
+            selected = resolve_osm_url()
+        self.assertEqual(selected,
+                         "https://download.geofabrik.de/europe/ukraine/ukraine-261119.osm.pbf")
+        self.assertIn("index.html", get.call_args.args[0])
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+
+    def test_geofabrik_listing_fallback_probes_direct_dated_file(self):
+        class Unavailable:
+            status_code = 503
+
+        class File:
+            status_code = 200
+            headers = {"Content-Length": "885221667"}
+
+        today = dt.datetime(2026, 11, 20, tzinfo=dt.timezone.utc)
+        with patch("pbradar.discovery.requests.get", return_value=Unavailable()), \
+             patch("pbradar.discovery.requests.head", side_effect=[Unavailable(), File()]):
+            selected = resolve_osm_url(now=today)
+        self.assertEqual(selected,
+                         "https://download.geofabrik.de/europe/ukraine/ukraine-261119.osm.pbf")
+
+    def test_redirect_is_rejected_without_losing_existing_data(self):
+        class Redirect:
+            status_code = 308
+            headers = {"Location": "https://download.geofabrik.de/europe/ukraine/ukraine/"}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return None
+
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / "ukraine-latest.osm.pbf"
+            data.write_bytes(b"previous")
+            with patch("pbradar.discovery.requests.get", return_value=Redirect()) as get:
+                with self.assertRaisesRegex(ValueError, "перенаправляє"):
+                    download_file("https://example.org/data", data)
+            self.assertFalse(get.call_args.kwargs["allow_redirects"])
+            self.assertEqual(data.read_bytes(), b"previous")
+
     def test_fresh_ready_and_stale(self):
         now = dt.datetime(2026, 11, 20, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as folder:

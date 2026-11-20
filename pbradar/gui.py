@@ -12,13 +12,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
+from PIL import Image, ImageTk
 
 from . import __version__
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
                    company_key, connect_db, export_csv, parse_ua_phones, read_contacts,
                    save_contact, set_phone_status)
-from .discovery import (OSM_URL, RegionIndex, WebsiteReader, download_file,
-                        ensure_regions, read_site_numbers)
+from .discovery import (RegionIndex, WebsiteReader, download_file,
+                        ensure_regions, read_site_numbers, resolve_osm_url)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 
@@ -28,18 +29,24 @@ PANEL = "#121d30"
 PANEL_RAISED = "#182740"
 TEXT = "#eaf0fa"
 MUTED = "#8da0ba"
-ACCENT = "#2bd4bd"
+ACCENT = "#dc2934"
 FONT = "Segoe UI"
+ASSETS = Path(__file__).resolve().parent / "assets"
 
 
 class App(ctk.CTk):
     def __init__(self):
         ctk.set_appearance_mode("dark")
         super().__init__()
-        self.title(f"PB Radar {__version__} · Пошук контактів")
+        self.title(f"Polski Bramy · Радар контактів {__version__}")
         self.geometry("1340x880")
         self.minsize(1050, 735)
         self.configure(fg_color=BG)
+        mark = Image.open(ASSETS / "polski-bramy-mark.png").convert("RGBA")
+        # Use the exact supplied emblem, tightly cropped for the taskbar icon.
+        mark = mark.crop((45, 56, 190, 202)).resize((64, 64), Image.Resampling.LANCZOS)
+        self.window_icon = ImageTk.PhotoImage(mark, master=self)
+        self.iconphoto(True, self.window_icon)
         cleanup_abandoned_download(OSM_FILE)
         cleanup_abandoned_download(INDEX_FILE)
         self.events = queue.Queue()
@@ -58,20 +65,25 @@ class App(ctk.CTk):
                         rowheight=33, font=(FONT, 10), borderwidth=0, relief="flat")
         style.configure("Treeview.Heading", background=PANEL_RAISED, foreground="#cbd8ec",
                         font=(FONT, 10, "bold"), relief="flat", padding=(6, 9))
-        style.map("Treeview", background=[("selected", "#275a73")], foreground=[("selected", "#ffffff")])
+        style.map("Treeview", background=[("selected", "#60303b")], foreground=[("selected", "#ffffff")])
         style.map("Treeview.Heading", background=[("active", "#253957")])
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=26, pady=(19, 12))
-        logo = ctk.CTkFrame(top, fg_color=ACCENT, width=47, height=47, corner_radius=13)
-        logo.pack(side="left")
-        logo.pack_propagate(False)
-        ctk.CTkLabel(logo, text="PB", text_color=BG, font=(FONT, 18, "bold")).pack(expand=True)
+        logo_panel = ctk.CTkFrame(top, fg_color="#ffffff", width=256, height=85, corner_radius=12)
+        logo_panel.pack(side="left")
+        logo_panel.pack_propagate(False)
+        logo_image = Image.open(ASSETS / "polski-bramy-logo.png").convert("RGBA")
+        logo_image = logo_image.crop((45, 56, 559, 202))
+        self.brand_logo = ctk.CTkImage(light_image=logo_image, dark_image=logo_image,
+                                        size=(234, 67))
+        ctk.CTkLabel(logo_panel, text="", image=self.brand_logo).pack(expand=True)
         heading = ctk.CTkFrame(top, fg_color="transparent")
-        heading.pack(side="left", padx=14)
-        ctk.CTkLabel(heading, text="RADAR", text_color=TEXT, font=(FONT, 26, "bold")).pack(anchor="w")
-        ctk.CTkLabel(heading, text="Публічні робочі контакти · Вся Україна", text_color=MUTED,
-                     font=(FONT, 11)).pack(anchor="w")
+        heading.pack(side="left", padx=17)
+        ctk.CTkLabel(heading, text="Пошук публічних робочих контактів",
+                     text_color=TEXT, font=(FONT, 15, "bold")).pack(anchor="w")
+        ctk.CTkLabel(heading, text="Вся Україна  ·  OSM  ·  Без CRM", text_color=MUTED,
+                     font=(FONT, 11)).pack(anchor="w", pady=(4, 0))
         self.osm_badge = ctk.CTkLabel(top, text="OSM · перевірка…", text_color=ACCENT,
                                       fg_color=PANEL_RAISED, corner_radius=12, height=34,
                                       font=(FONT, 11, "bold"))
@@ -87,7 +99,7 @@ class App(ctk.CTk):
 
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.pack(fill="x", padx=26, pady=(0, 9))
-        self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT, dark_text=True)
+        self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT)
         self.stop_btn = self.button(toolbar, "■   Зупинити", self.stop_search, PANEL_RAISED)
         self.download_btn = self.button(toolbar, "↓   Завантажити / оновити OSM", self.download_osm, "#24528a")
         self.source_btn = self.button(toolbar, "Власний PBF", self.choose_source, PANEL_RAISED)
@@ -169,7 +181,7 @@ class App(ctk.CTk):
         for i, (name, var) in enumerate(variables.items()):
             ctk.CTkCheckBox(box, text=name, variable=var, width=22, height=24,
                             checkbox_width=17, checkbox_height=17, corner_radius=5,
-                            fg_color=ACCENT, hover_color="#2aaea1", border_color="#4d627d",
+                            fg_color=ACCENT, hover_color="#b61d2e", border_color="#4d627d",
                             text_color="#dce8f6", font=(FONT, 11)).grid(
                                 row=i // 2, column=i % 2, sticky="w", padx=(7, 3), pady=5)
         return variables
@@ -183,7 +195,7 @@ class App(ctk.CTk):
     def button(parent, label, action, color, *, dark_text=False, width=110, height=37, side="left"):
         btn = ctk.CTkButton(parent, text=label, command=action, fg_color=color,
                             text_color=BG if dark_text else TEXT,
-                            hover_color="#20ad9b" if dark_text else "#315174",
+                            hover_color="#c12130" if color == ACCENT else "#315174",
                             font=(FONT, 11, "bold"), corner_radius=10,
                             height=height, width=width)
         btn.pack(side=side, padx=(0, 7))
@@ -266,8 +278,10 @@ class App(ctk.CTk):
             return
 
         def work():
+            self.ui_event("message", "Визначаю актуальний OSM-архів усієї України…")
+            source_url = resolve_osm_url(lambda s: self.ui_event("message", s))
             self.ui_event("message", "Завантажую OSM для всієї України…")
-            download_file(OSM_URL, OSM_FILE, lambda s: self.ui_event("message", s),
+            download_file(source_url, OSM_FILE, lambda s: self.ui_event("message", s),
                           cancel=self.cancel, validate_pbf=True)
             self.ui_event("message", "Готую одноразовий індекс областей та організацій…")
             count = build_osm_index(OSM_FILE, RegionIndex(ensure_regions()),

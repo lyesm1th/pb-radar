@@ -34,7 +34,7 @@ jobs:
       - name: Package radar and launcher
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name PB-Radar --collect-all osmium --collect-all customtkinter --add-data "pbradar/assets/ukraine-adm1.geojson;pbradar/assets" run_app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name PB-Radar --collect-all osmium --collect-all customtkinter --add-data "pbradar/assets/ukraine-adm1.geojson;pbradar/assets" --add-data "pbradar/assets/polski-bramy-logo.png;pbradar/assets" --add-data "pbradar/assets/polski-bramy-mark.png;pbradar/assets" run_app.py
           pyinstaller --noconfirm --clean --onefile --windowed --name PB-Radar-Launcher run_launcher.py
           Compress-Archive -Path dist/PB-Radar.exe -DestinationPath dist/PB-Radar-App.zip -Force
       - uses: actions/upload-artifact@v4

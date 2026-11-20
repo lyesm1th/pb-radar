@@ -20,6 +20,53 @@ from .core import BASE_DIR, REGIONS, classify, normalize_url, parse_ua_phones
 
 USER_AGENT = "PB-Radar/0.1 (business contact source verification; respectful crawler)"
 OSM_URL = "https://download.geofabrik.de/europe/ukraine-latest.osm.pbf"
+OSM_INDEX_URL = "https://download.geofabrik.de/europe/ukraine/index.html"
+OSM_DATED_URL = "https://download.geofabrik.de/europe/ukraine/ukraine-{}.osm.pbf"
+
+
+def resolve_osm_url(progress=None, now: dt.datetime | None = None) -> str:
+    """Get a direct, dated Geofabrik URL without following its broken latest alias.
+
+    At present the `ukraine-latest.osm.pbf` alias returns a recursive HTTP 308:
+    `/europe/ukraine/ukraine/ukraine/...`. The dated download URLs work.
+    """
+    try:
+        response = requests.get(OSM_INDEX_URL, timeout=(10, 18), allow_redirects=False,
+                                headers={"User-Agent": USER_AGENT})
+        if response.status_code == 200:
+            candidates = []
+            for link in BeautifulSoup(response.text, "html.parser").select("a[href]"):
+                url = urljoin(OSM_INDEX_URL, link.get("href", ""))
+                match = re.fullmatch(
+                    r"https://download\.geofabrik\.de/europe/ukraine/ukraine-(\d{6})\.osm\.pbf", url
+                )
+                if match:
+                    candidates.append((match.group(1), url))
+            if candidates:
+                date, url = max(candidates)
+                if progress:
+                    progress(f"Знайдено актуальний архів Geofabrik від {date[4:6]}.{date[2:4]}.20{date[:2]}")
+                return url
+    except requests.RequestException:
+        pass
+
+    # The directory listing may be temporarily unavailable. Exact dated URLs
+    # have no redirect loop; probe the previous two weeks without downloading.
+    today = (now or dt.datetime.now(dt.timezone.utc)).date()
+    for offset in range(14):
+        date = today - dt.timedelta(days=offset)
+        url = OSM_DATED_URL.format(date.strftime("%y%m%d"))
+        try:
+            response = requests.head(url, timeout=(8, 12), allow_redirects=False,
+                                     headers={"User-Agent": USER_AGENT})
+            if response.status_code == 200 and int(response.headers.get("Content-Length", "0")) > 100_000:
+                if progress:
+                    progress(f"Знайдено актуальний архів Geofabrik від {date:%d.%m.%Y}")
+                return url
+        except (requests.RequestException, ValueError):
+            continue
+    raise RuntimeError("Не вдалося визначити актуальний OSM-файл на Geofabrik. "
+                       "Спробуй пізніше або вибери завантажений PBF через «Власний PBF».")
 
 
 def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_000_000,
@@ -29,7 +76,11 @@ def download_file(url: str, destination: Path, progress=None, max_bytes=1_500_00
     part = destination.with_suffix(destination.suffix + ".partial")
     size = 0
     try:
-        with requests.get(url, stream=True, timeout=(15, 65), headers={"User-Agent": USER_AGENT}) as resp:
+        with requests.get(url, stream=True, timeout=(15, 65), allow_redirects=False,
+                          headers={"User-Agent": USER_AGENT}) as resp:
+            if 300 <= getattr(resp, "status_code", 200) < 400:
+                raise ValueError("Джерело перенаправляє завантаження. "
+                                 "Вибери актуальний архів Geofabrik або спробуй пізніше.")
             resp.raise_for_status()
             declared = int(resp.headers.get("Content-Length", "0"))
             if declared > max_bytes:
