@@ -56,9 +56,8 @@ class App(ctk.CTk):
         self.geometry("1340x880")
         self.minsize(1050, 735)
         self.configure(fg_color=BG)
-        mark = Image.open(ASSETS / "polski-bramy-mark.png").convert("RGBA")
-        # Use the exact supplied emblem, tightly cropped for the taskbar icon.
-        mark = mark.crop((45, 56, 190, 202)).resize((64, 64), Image.Resampling.LANCZOS)
+        mark = Image.open(ASSETS / "pb-radar-icon.png").convert("RGBA")
+        mark = mark.resize((64, 64), Image.Resampling.LANCZOS)
         self.window_icon = ImageTk.PhotoImage(mark, master=self)
         self.iconphoto(True, self.window_icon)
         cleanup_abandoned_download(OSM_FILE)

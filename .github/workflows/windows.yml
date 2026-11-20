@@ -36,8 +36,8 @@ jobs:
       - name: Package radar and launcher
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --icon dist/PB-Radar.ico --name PB-Radar --collect-all osmium --collect-all customtkinter --add-data "pbradar/assets/ukraine-adm1.geojson;pbradar/assets" --add-data "pbradar/assets/polski-bramy-logo.png;pbradar/assets" --add-data "pbradar/assets/polski-bramy-mark.png;pbradar/assets" run_app.py
-          pyinstaller --noconfirm --clean --onefile --windowed --icon dist/PB-Radar.ico --name PB-Radar-Launcher run_launcher.py
+          pyinstaller --noconfirm --clean --onefile --windowed --icon dist/PB-Radar.ico --name PB-Radar --collect-all osmium --collect-all customtkinter --add-data "pbradar/assets/ukraine-adm1.geojson;pbradar/assets" --add-data "pbradar/assets/polski-bramy-logo.png;pbradar/assets" --add-data "pbradar/assets/polski-bramy-mark.png;pbradar/assets" --add-data "pbradar/assets/pb-radar-icon.png;pbradar/assets" run_app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --icon dist/PB-Radar.ico --name PB-Radar-Launcher --add-data "pbradar/assets/pb-radar-icon.png;pbradar/assets" run_launcher.py
           Compress-Archive -Path dist/PB-Radar.exe -DestinationPath dist/PB-Radar-App.zip -Force
       - name: Build one-time Windows installer
         shell: pwsh

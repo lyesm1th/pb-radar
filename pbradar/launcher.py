@@ -20,6 +20,7 @@ from tkinter import messagebox, simpledialog
 from urllib.parse import urlparse
 
 import requests
+from PIL import Image, ImageTk
 
 from .core import BASE_DIR
 from .osm_storage import OSM_FILE
@@ -161,6 +162,9 @@ class Launcher(tk.Tk):
         self.geometry("540x405")
         self.resizable(False, False)
         self.configure(bg="#0b1220")
+        emblem = Image.open(Path(__file__).resolve().parent / "assets" / "pb-radar-icon.png")
+        self.window_icon = ImageTk.PhotoImage(emblem.resize((64, 64), Image.Resampling.LANCZOS), master=self)
+        self.iconphoto(True, self.window_icon)
         self.info = None
         self.busy = False
         ensure_data_directories()

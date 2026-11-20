@@ -1,4 +1,4 @@
 """PB Radar — local Ukrainian business contact discovery."""
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
