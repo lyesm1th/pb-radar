@@ -217,6 +217,18 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             UNIQUE(company_id, phone)
         );
         CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+        CREATE TABLE IF NOT EXISTS company_categories (
+            company_id INTEGER NOT NULL REFERENCES companies(id),
+            category TEXT NOT NULL,
+            PRIMARY KEY(company_id, category)
+        );
+        CREATE INDEX IF NOT EXISTS idx_company_categories_category ON company_categories(category);
+        CREATE TABLE IF NOT EXISTS company_regions (
+            company_id INTEGER NOT NULL REFERENCES companies(id),
+            region TEXT NOT NULL,
+            PRIMARY KEY(company_id, region)
+        );
+        CREATE INDEX IF NOT EXISTS idx_company_regions_region ON company_regions(region);
         CREATE TABLE IF NOT EXISTS website_checks (
             website TEXT PRIMARY KEY, checked_at TEXT NOT NULL,
             phone_count INTEGER NOT NULL DEFAULT 0
@@ -243,6 +255,18 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             ownership = classify_ownership(row["name"])
             if ownership != "Не визначено":
                 con.execute("UPDATE companies SET ownership=? WHERE id=?", (ownership, row["id"]))
+    # Backfill before any scan; legacy databases only carried one display field.
+    # Multi-category membership prevents a later directory from overwriting an
+    # earlier category and making its phone disappear under category filters.
+    for row in con.execute("""SELECT id,category FROM companies p WHERE NOT EXISTS
+                              (SELECT 1 FROM company_categories cc WHERE cc.company_id=p.id)"""):
+        for category in (part.strip() for part in row["category"].split(", ")):
+            if category:
+                con.execute("INSERT OR IGNORE INTO company_categories(company_id,category) VALUES(?,?)",
+                            (row["id"], category))
+    con.execute("""INSERT OR IGNORE INTO company_regions(company_id,region)
+                   SELECT p.id,p.region FROM companies p WHERE NOT EXISTS
+                   (SELECT 1 FROM company_regions cr WHERE cr.company_id=p.id)""")
     return con
 
 
@@ -318,7 +342,7 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
                               source_url, checked_at, activity, ownership, edrpou)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company_key) DO UPDATE SET
-            name=excluded.name, category=excluded.category,
+            name=excluded.name,
             region=CASE WHEN excluded.region != 'Не визначено' THEN excluded.region ELSE companies.region END,
             website=CASE WHEN excluded.website != '' THEN excluded.website ELSE companies.website END,
             social=CASE WHEN excluded.social != '' THEN excluded.social ELSE companies.social END,
@@ -330,6 +354,13 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
                            ELSE companies.ownership END
     """, (key, name, category, region, website, social, source_url, now, activity, ownership, edrpou))
     company_id = con.execute("SELECT id FROM companies WHERE company_key=?", (key,)).fetchone()[0]
+    con.execute("INSERT OR IGNORE INTO company_categories(company_id,category) VALUES(?,?)",
+                (company_id, category))
+    if region and region != "Не визначено":
+        con.execute("DELETE FROM company_regions WHERE company_id=? AND region='Не визначено'",
+                    (company_id,))
+        con.execute("INSERT OR IGNORE INTO company_regions(company_id,region) VALUES(?,?)",
+                    (company_id, region))
     if inherited_ownership:
         con.execute("UPDATE companies SET ownership=?, ownership_locked=1 WHERE id=?",
                     (inherited_ownership, company_id))
@@ -386,10 +417,21 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
             if not selected:
                 clauses.append("1=0")
             else:
-                clauses.append(f"p2.{field} IN ({','.join('?' for _ in selected)})")
+                if field == "category":
+                    clauses.append("EXISTS (SELECT 1 FROM company_categories cc WHERE "
+                                   "cc.company_id=p2.id AND cc.category IN (" +
+                                   ",".join("?" for _ in selected) + "))")
+                else:
+                    clauses.append("EXISTS (SELECT 1 FROM company_regions cr WHERE "
+                                   "cr.company_id=p2.id AND cr.region IN (" +
+                                   ",".join("?" for _ in selected) + "))")
                 args.extend(sorted(selected))
     filter_sql = " AND ".join(clauses)
-    sql = """SELECT c.id, p.id AS company_id, p.name, p.category, p.region, c.phone,
+    sql = """SELECT c.id, p.id AS company_id, p.name,
+                    (SELECT GROUP_CONCAT(cc.category, ', ') FROM company_categories cc
+                     WHERE cc.company_id=p.id) AS category,
+                    COALESCE((SELECT GROUP_CONCAT(cr.region, ', ') FROM company_regions cr
+                              WHERE cr.company_id=p.id), p.region) AS region, c.phone,
                     c.role, c.status, p.website, p.social, c.source_url, c.checked_at,
                     p.activity, p.ownership, p.edrpou
              FROM contacts c JOIN companies p ON p.id=c.company_id
@@ -397,7 +439,10 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
                  SELECT id FROM (
                      SELECT c2.id, ROW_NUMBER() OVER (
                          PARTITION BY c2.phone ORDER BY
-                         CASE WHEN c2.status='Не опрацьований' THEN 1 ELSE 0 END, c2.id
+                         CASE WHEN c2.status='Не опрацьований' THEN 1 ELSE 0 END,
+                         CASE WHEN p2.ownership='Державна / комунальна' THEN 1 ELSE 0 END,
+                         CASE WHEN LOWER(c2.source_url) LIKE '%prozorro.gov.ua%' THEN 1 ELSE 0 END,
+                         c2.id
                      ) AS row_rank FROM contacts c2
                      JOIN companies p2 ON p2.id=c2.company_id
                      WHERE """ + filter_sql + """

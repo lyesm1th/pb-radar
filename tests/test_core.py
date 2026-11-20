@@ -133,7 +133,9 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(filtered[0]["name"], "ТОВ Будмонтаж")
                 self.assertEqual(filtered[0]["ownership"], "Приватна")
                 self.assertEqual(len(filter_ownership(filtered, "Тільки приватні")), 1)
-                self.assertEqual(len(filter_ownership(read_contacts(con), "Без державних")), 0)
+                # A public buyer must not hide the same phone's private-company
+                # association when that is the audience the user wants.
+                self.assertEqual(len(filter_ownership(read_contacts(con), "Без державних")), 1)
 
     def test_table_widths_and_source_filters_persist_in_same_database(self):
         with tempfile.TemporaryDirectory() as temp:

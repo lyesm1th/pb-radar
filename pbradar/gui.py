@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 
 from . import __version__
 from .branding import red_mark_icon
+from .catalogs import scan_catalogs
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES, OWNERSHIP_FILTERS,
                    OWNERSHIP_TYPES, company_key, connect_db, copyable_contact_value,
                    export_csv, filter_contacts, filter_ownership,
@@ -27,6 +28,7 @@ from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES, OWNERSHIP_FI
                    site_needs_check, visible_link, write_setting)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
+from .lun import scan_lun
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 from .prozorro import read_cursor, scan_prozorro
@@ -125,7 +127,7 @@ class App(ctk.CTk):
         heading.pack(side="left", padx=17)
         ctk.CTkLabel(heading, text="Пошук публічних робочих контактів",
                      text_color=TEXT, font=(FONT, 15, "bold")).pack(anchor="w")
-        ctk.CTkLabel(heading, text="Вся Україна  ·  OSM + Prozorro  ·  Без CRM", text_color=MUTED,
+        ctk.CTkLabel(heading, text="Каталоги + ЛУН + OSM + Prozorro  ·  Без CRM", text_color=MUTED,
                      font=(FONT, 11)).pack(anchor="w", pady=(4, 0))
         self.reset_layout_btn = ctk.CTkButton(
             top, text="↺", width=35, height=34, corner_radius=10,
@@ -160,19 +162,30 @@ class App(ctk.CTk):
         controls.pack(fill="x")
         toolbar = ctk.CTkFrame(controls, fg_color="transparent")
         toolbar.pack(fill="x", pady=(7, 9))
-        self.start_btn = self.button(toolbar, "▶   Запустити радар", self.start_search, ACCENT)
+        self.start_btn = self.button(toolbar, "▶   Радар · номери", self.start_catalog_search, ACCENT,
+                                     width=147)
         self.stop_btn = self.button(toolbar, "■   Зупинити", self.stop_search, PANEL_RAISED)
-        self.download_btn = self.button(toolbar, "↓   Завантажити / оновити OSM", self.download_osm, "#24528a")
-        self.source_btn = self.button(toolbar, "Власний PBF", self.choose_source, PANEL_RAISED)
+        self.osm_search_btn = self.button(toolbar, "OSM · пошук", self.start_search, PANEL_RAISED,
+                                          width=110)
         self.prozorro_btn = self.button(toolbar, "Prozorro · контакти", self.start_prozorro,
                                        "#24528a", width=145)
-        self.export_btn = self.button(toolbar, "Експорт CSV", self.export, PANEL_RAISED, side="right")
-        self.import_btn = self.button(toolbar, "Імпорт CSV", self.import_contacts, PANEL_RAISED, side="right")
+        self.lun_btn = self.button(toolbar, "ЛУН · забудовники", self.start_lun,
+                                   "#24528a", width=145)
+        sources = ctk.CTkFrame(controls, fg_color="transparent")
+        sources.pack(fill="x", pady=(0, 8))
+        self.download_btn = self.button(sources, "↓   Завантажити / оновити OSM", self.download_osm,
+                                        "#24528a", height=31)
+        self.source_btn = self.button(sources, "Власний PBF", self.choose_source,
+                                      PANEL_RAISED, height=31)
+        self.export_btn = self.button(sources, "Експорт CSV", self.export, PANEL_RAISED,
+                                      height=31, side="right")
+        self.import_btn = self.button(sources, "Імпорт CSV", self.import_contacts, PANEL_RAISED,
+                                      height=31, side="right")
 
         status = ctk.CTkFrame(controls, fg_color=PANEL, corner_radius=12, height=62)
         status.pack(fill="x", pady=(0, 9))
         status.pack_propagate(False)
-        self.status_text = tk.StringVar(value="Готово. Завантажте OSM усієї України для першого пошуку.")
+        self.status_text = tk.StringVar(value="Готово. «Радар · номери» працює без OSM: збирає телефони з каталогів компаній.")
         ctk.CTkLabel(status, textvariable=self.status_text, text_color=TEXT,
                      font=(FONT, 11), anchor="w").pack(fill="x", padx=15, pady=(8, 0))
         self.progress = ctk.CTkProgressBar(status, height=4, mode="indeterminate",
@@ -537,6 +550,8 @@ class App(ctk.CTk):
                 elif kind == "done":
                     self.working = False
                     self.start_btn.configure(state="normal")
+                    self.osm_search_btn.configure(state="normal")
+                    self.lun_btn.configure(state="normal")
                     self.prozorro_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
@@ -547,6 +562,8 @@ class App(ctk.CTk):
                 elif kind == "error":
                     self.working = False
                     self.start_btn.configure(state="normal")
+                    self.osm_search_btn.configure(state="normal")
+                    self.lun_btn.configure(state="normal")
                     self.prozorro_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
@@ -565,6 +582,8 @@ class App(ctk.CTk):
         self.working = True
         self.cancel.clear()
         self.start_btn.configure(state="disabled")
+        self.osm_search_btn.configure(state="disabled")
+        self.lun_btn.configure(state="disabled")
         self.prozorro_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
         self.source_btn.configure(state="disabled")
@@ -576,6 +595,7 @@ class App(ctk.CTk):
                 text = fn()
                 self.ui_event("done", text)
             except InterruptedError:
+                self.ui_event("refresh", None)
                 self.ui_event("done", "Зупинено користувачем. Знайдені контакти збережено.")
             except Exception as exc:
                 self.ui_event("error", f"Не вдалося виконати дію: {exc}")
@@ -607,6 +627,55 @@ class App(ctk.CTk):
             self.custom_osm = OSM_FILE
             return (f"OSM України оновлено ({source_name}) · індекс готовий · "
                     f"організацій: {count:,}. Можна шукати за областями.")
+
+        self.run_task(work)
+
+    def start_catalog_search(self):
+        categories = {name for name, var in self.cat_vars.items() if var.get()}
+        regions = {name for name, var in self.reg_vars.items() if var.get()}
+        if not categories or not regions:
+            messagebox.showwarning("Фільтри", "Вибери хоча б одну категорію та область.")
+            return
+        self.update_list_filters()
+
+        def work():
+            found = scan_catalogs(
+                categories, regions, cancel=self.cancel,
+                progress=lambda s: self.ui_event("message", s),
+                refresh=lambda: self.ui_event("refresh", None))
+            lun_text = ""
+            if "Забудовники" in categories and not self.cancel.is_set():
+                try:
+                    lun = scan_lun(regions, cancel=self.cancel, max_profiles=100,
+                                   progress=lambda s: self.ui_event("message", s),
+                                   refresh=lambda: self.ui_event("refresh", None))
+                    lun_text = f" ЛУН: {lun['profiles']} профілів, нових {lun['new']}."
+                except RuntimeError as exc:
+                    lun_text = f" ЛУН тимчасово недоступний: {exc}."
+            return (f"Каталоги: сторінок {found['pages']:,}, контактних записів "
+                    f"{found['listed']:,}, нових унікальних номерів {found['new']:,}. "
+                    + lun_text + " "
+                    + f"Недоступних розділів: {found['unavailable']:,}; помилок: {found['failed']:,}. "
+                    "Повторний запуск продовжить незавершені каталоги.")
+
+        self.run_task(work)
+
+    def start_lun(self):
+        regions = {name for name, var in self.reg_vars.items() if var.get()}
+        categories = {name for name, var in self.cat_vars.items() if var.get()}
+        if not regions or "Забудовники" not in categories:
+            messagebox.showwarning("ЛУН", "Вибери «Забудовники» та хоча б одну область.")
+            return
+        self.update_list_filters()
+
+        def work():
+            result = scan_lun(regions, cancel=self.cancel,
+                              progress=lambda s: self.ui_event("message", s),
+                              refresh=lambda: self.ui_event("refresh", None))
+            return (f"ЛУН: перевірено {result['profiles']:,} профілів із {result['total']:,}, "
+                    f"профілів із телефонами {result['with_phone']:,}, "
+                    f"нових унікальних номерів {result['new']:,}; "
+                    f"залишилось {result['remaining']:,}. Результат збережено.")
 
         self.run_task(work)
 
