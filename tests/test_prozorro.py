@@ -12,13 +12,15 @@ from pbradar.prozorro import (extract_tender_contacts, read_cursor,
 
 def buyer(name="Міське управління", phone="+380671234567", region="Львівська область"):
     return {"name": name, "contactPoint": {"telephone": phone},
-            "address": {"region": region, "locality": "Львів"}}
+            "address": {"region": region, "locality": "Львів"}, "kind": "authority",
+            "identifier": {"scheme": "UA-EDR", "id": "12345678"}}
 
 
 def supplier():
     return {"name": "ТОВ Будмонтаж", "contactPoint": {"telephone": "0501234567",
             "uri": "https://budmontazh.example"},
-            "address": {"region": "Київська область", "locality": "Буча"}}
+            "address": {"region": "Київська область", "locality": "Буча"},
+            "identifier": {"scheme": "UA-EDR", "id": "87654321"}}
 
 
 class FakeResponse:
@@ -63,6 +65,8 @@ class ProzorroTests(unittest.TestCase):
         rows = extract_tender_contacts(tender,
                                       {"Будівельні компанії", "Відділи закупівель"}, set())
         self.assertEqual({row["phone"] for row in rows}, {"+380671234567", "+380501234567"})
+        self.assertEqual({row["ownership"] for row in rows}, {"Приватна", "Державна / комунальна"})
+        self.assertEqual({row["edrpou"] for row in rows}, {"12345678", "87654321"})
         self.assertEqual({row["region"] for row in rows}, {"Львівська", "Київська"})
         self.assertTrue(all("prozorro.gov.ua/tender/" in row["source_url"] for row in rows))
         self.assertEqual(len(extract_tender_contacts(tender, {"Будівельні компанії"}, {"Львівська"})), 0)

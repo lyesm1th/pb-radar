@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import json
 import os
 import re
 import sqlite3
@@ -38,6 +39,52 @@ CONTACT_STATUSES = (
     "Номер недійсний", "Не цікавить співпраця", "Потенційний партнер",
     "Співпрацюємо", "Не контактувати",
 )
+
+OWNERSHIP_TYPES = ("Приватна", "Державна / комунальна", "Не визначено")
+OWNERSHIP_FILTERS = ("Без державних", "Тільки приватні", "Державні", "Не визначено", "Усі")
+
+
+def classify_ownership(name: str, *, buyer_kind: str = "") -> str:
+    """Conservative classification; an organization's name is not an ownership registry.
+
+    Prozorro's official ``procuringEntity.kind`` distinguishes public buyers.
+    ``special`` may include entities with different ownership, so it remains
+    unknown without a clear legal-form hint. Managers can override the result.
+    """
+    kind = buyer_kind.casefold().strip()
+    if kind in {"authority", "central", "defense", "general", "other", "social"}:
+        return "Державна / комунальна"
+    upper = re.sub(r"\s+", " ", name or "").upper().strip(' "«»')
+    if re.search(r"\b(КОМУНАЛЬН(?:Е|А|ИЙ|ОГО)|ДЕРЖАВН(?:Е|А|ИЙ|ОГО)|БЮДЖЕТН(?:А|Е)|ВІЙСЬКОВА ЧАСТИНА|"
+                 r"МІСЬКА РАДА|СЕЛИЩНА РАДА|СІЛЬСЬКА РАДА|РАЙОННА ДЕРЖАВНА АДМІНІСТРАЦІЯ)\b", upper):
+        return "Державна / комунальна"
+    if re.match(r"^(ТОВ|ТЗОВ|ФОП|ПП|ПРИВАТНЕ ПІДПРИЄМСТВО)\b", upper):
+        return "Приватна"
+    return "Не визначено"
+
+
+def filter_ownership(rows: list[dict], mode: str) -> list[dict]:
+    if mode == "Без державних":
+        return [row for row in rows if row["ownership"] != "Державна / комунальна"]
+    mapping = {"Тільки приватні": "Приватна", "Державні": "Державна / комунальна",
+               "Не визначено": "Не визначено"}
+    return [row for row in rows if row["ownership"] == mapping[mode]] if mode in mapping else rows
+
+
+def group_contacts_by_company(rows: list[dict]) -> list[list[dict]]:
+    """Group display rows by official company ID or a stable local company key.
+
+    Each number retains its individual status and source in the children. We
+    deliberately do not merge similar names unless a shared EDRPOU confirms
+    that the records refer to the same registered entity.
+    """
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        key = ("edr:" + str(row["edrpou"])) if row.get("edrpou") else (
+            "company:" + str(row["company_id"]) if row.get("company_id") else
+            "row:" + str(row.get("id", "")))
+        groups.setdefault(key, []).append(row)
+    return list(groups.values())
 
 # Match business categories using public OSM tags and business names. Inference
 # does not imply the phone belongs to a named individual or department.
@@ -156,7 +203,10 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             name TEXT NOT NULL, category TEXT NOT NULL, region TEXT NOT NULL,
             website TEXT NOT NULL DEFAULT '', social TEXT NOT NULL DEFAULT '',
             source_url TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL DEFAULT '',
-            activity TEXT NOT NULL DEFAULT 'Невідомо'
+            activity TEXT NOT NULL DEFAULT 'Невідомо',
+            ownership TEXT NOT NULL DEFAULT 'Не визначено',
+            ownership_locked INTEGER NOT NULL DEFAULT 0,
+            edrpou TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS contacts (
             id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES companies(id),
@@ -175,8 +225,43 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             source TEXT PRIMARY KEY, offset TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT ''
+        );
     """)
+    # Upgrade pre-0.4.1 databases in place, keeping all manager statuses.
+    columns = {row["name"] for row in con.execute("PRAGMA table_info(companies)")}
+    migrating = "ownership" not in columns
+    if "ownership" not in columns:
+        con.execute("ALTER TABLE companies ADD COLUMN ownership TEXT NOT NULL DEFAULT 'Не визначено'")
+    if "ownership_locked" not in columns:
+        con.execute("ALTER TABLE companies ADD COLUMN ownership_locked INTEGER NOT NULL DEFAULT 0")
+    if "edrpou" not in columns:
+        con.execute("ALTER TABLE companies ADD COLUMN edrpou TEXT NOT NULL DEFAULT ''")
+    if migrating:
+        for row in con.execute("SELECT id,name FROM companies"):
+            ownership = classify_ownership(row["name"])
+            if ownership != "Не визначено":
+                con.execute("UPDATE companies SET ownership=? WHERE id=?", (ownership, row["id"]))
     return con
+
+
+def read_setting(con: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def write_setting(con: sqlite3.Connection, key: str, value: str) -> None:
+    con.execute("""INSERT INTO app_settings(key,value) VALUES(?,?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, value))
+
+
+def read_column_widths(con: sqlite3.Connection) -> dict[str, int]:
+    try:
+        widths = json.loads(read_setting(con, "column_widths", "{}"))
+        return {str(k): max(55, min(900, int(v))) for k, v in widths.items()}
+    except (ValueError, TypeError, AttributeError):
+        return {}
 
 
 def site_needs_check(con: sqlite3.Connection, website: str,
@@ -204,7 +289,7 @@ def mark_site_checked(con: sqlite3.Connection, website: str, phone_count: int) -
 def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
                  phone: str, website: str = "", source_url: str = "",
                  activity: str = "Невідомо", role: str = "Не визначено",
-                 social: str = "") -> bool:
+                 social: str = "", ownership: str = "", edrpou: str = "") -> bool:
     """Upsert phone and preserve its review status across searches and companies.
 
     Returns True only if this *phone number* has never been seen before, even
@@ -212,18 +297,42 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
     """
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     key = company_key(name, website, region)
+    if ownership not in OWNERSHIP_TYPES:
+        ownership = classify_ownership(name)
+    edrpou = edrpou.strip() if re.fullmatch(r"\d{8}|\d{10}", edrpou.strip()) else ""
+    inherited_ownership = None
+    if edrpou:
+        # A shared home page or a repeated name is not enough to identify a
+        # legal entity. Keep distinct registry numbers as distinct companies.
+        existing = con.execute("SELECT edrpou FROM companies WHERE company_key=?", (key,)).fetchone()
+        if existing and existing["edrpou"] and existing["edrpou"] != edrpou:
+            key = "edr:" + edrpou
+        prior_owner = con.execute("""SELECT ownership FROM companies
+                                    WHERE edrpou=? AND ownership_locked=1 LIMIT 1""",
+                                  (edrpou,)).fetchone()
+        if prior_owner:
+            inherited_ownership = prior_owner["ownership"]
+            ownership = inherited_ownership
     con.execute("""
-        INSERT INTO companies(company_key, name, category, region, website, social, source_url, checked_at, activity)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO companies(company_key, name, category, region, website, social,
+                              source_url, checked_at, activity, ownership, edrpou)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company_key) DO UPDATE SET
             name=excluded.name, category=excluded.category,
             region=CASE WHEN excluded.region != 'Не визначено' THEN excluded.region ELSE companies.region END,
             website=CASE WHEN excluded.website != '' THEN excluded.website ELSE companies.website END,
             social=CASE WHEN excluded.social != '' THEN excluded.social ELSE companies.social END,
             checked_at=excluded.checked_at,
-            activity=CASE WHEN excluded.activity != 'Невідомо' THEN excluded.activity ELSE companies.activity END
-    """, (key, name, category, region, website, social, source_url, now, activity))
+            activity=CASE WHEN excluded.activity != 'Невідомо' THEN excluded.activity ELSE companies.activity END,
+            edrpou=CASE WHEN excluded.edrpou != '' THEN excluded.edrpou ELSE companies.edrpou END,
+            ownership=CASE WHEN companies.ownership_locked=1 THEN companies.ownership
+                           WHEN excluded.ownership != 'Не визначено' THEN excluded.ownership
+                           ELSE companies.ownership END
+    """, (key, name, category, region, website, social, source_url, now, activity, ownership, edrpou))
     company_id = con.execute("SELECT id FROM companies WHERE company_key=?", (key,)).fetchone()[0]
+    if inherited_ownership:
+        con.execute("UPDATE companies SET ownership=?, ownership_locked=1 WHERE id=?",
+                    (inherited_ownership, company_id))
     prior = con.execute(
         """SELECT status FROM contacts WHERE phone=?
            ORDER BY CASE WHEN status='Не опрацьований' THEN 1 ELSE 0 END, id
@@ -241,6 +350,19 @@ def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,
     return prior is None
 
 
+def set_company_ownership(con: sqlite3.Connection, company_id: int, ownership: str) -> None:
+    """Manager's decision survives repeated scans and later classification."""
+    if ownership not in OWNERSHIP_TYPES:
+        raise ValueError("Невідомий тип організації")
+    entity = con.execute("SELECT edrpou FROM companies WHERE id=?", (company_id,)).fetchone()
+    if entity and entity["edrpou"]:
+        con.execute("UPDATE companies SET ownership=?, ownership_locked=1 WHERE edrpou=?",
+                    (ownership, entity["edrpou"]))
+    else:
+        con.execute("UPDATE companies SET ownership=?, ownership_locked=1 WHERE id=?",
+                    (ownership, company_id))
+
+
 def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
     """Mark every record of the same number so it never reappears as new."""
     if status not in CONTACT_STATUSES:
@@ -249,11 +371,13 @@ def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
     return cursor.rowcount
 
 
-def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = ()) -> list[dict]:
+def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
+                  *, include_prozorro: bool = True) -> list[dict]:
     # Show one row per number, prioritizing an already-reviewed association.
     # All underlying source/company associations remain in SQLite.
-    sql = """SELECT c.id, p.name, p.category, p.region, c.phone, c.role, c.status,
-                    p.website, p.social, c.source_url, c.checked_at, p.activity
+    sql = """SELECT c.id, p.id AS company_id, p.name, p.category, p.region, c.phone,
+                    c.role, c.status, p.website, p.social, c.source_url, c.checked_at,
+                    p.activity, p.ownership, p.edrpou
              FROM contacts c JOIN companies p ON p.id=c.company_id
              WHERE c.id IN (
                  SELECT id FROM (
@@ -261,19 +385,20 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = ()) -> li
                          PARTITION BY phone ORDER BY
                          CASE WHEN status='Не опрацьований' THEN 1 ELSE 0 END, id
                      ) AS row_rank FROM contacts
+                     WHERE (?=1 OR LOWER(source_url) NOT LIKE '%prozorro.gov.ua%')
                  ) WHERE row_rank = 1
              )"""
-    args: list[str] = []
+    args: list[str | int] = [int(include_prozorro)]
     if statuses:
         sql += " AND c.status IN (" + ",".join("?" for _ in statuses) + ")"
-        args = list(statuses)
+        args.extend(statuses)
     sql += " ORDER BY c.checked_at DESC, p.name"
     return [dict(row) for row in con.execute(sql, args)]
 
 
 SEARCH_FIELDS = (
     "name", "category", "region", "phone", "role", "status", "website",
-    "social", "source_url", "checked_at", "activity",
+    "social", "source_url", "checked_at", "activity", "ownership", "edrpou",
 )
 
 
@@ -301,7 +426,8 @@ def filter_contacts(rows: list[dict], query: str) -> list[dict]:
 
 
 def export_csv(path: Path, rows: list[dict]) -> None:
-    headings = ("name", "category", "region", "phone", "role", "status", "website", "social", "source_url", "checked_at", "activity")
+    headings = ("name", "category", "region", "phone", "role", "status", "ownership", "edrpou",
+                "website", "social", "source_url", "checked_at", "activity")
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headings, extrasaction="ignore", delimiter=";")
         writer.writeheader()

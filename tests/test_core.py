@@ -3,15 +3,130 @@ import unittest
 import datetime as dt
 from pathlib import Path
 
-from pbradar.core import (classify, company_key, connect_db, export_csv, filter_contacts,
-                          mark_site_checked, parse_ua_phones, read_contacts, save_contact,
-                          set_phone_status, site_needs_check)
+from pbradar.core import (classify, classify_ownership, company_key, connect_db, export_csv,
+                          filter_contacts, filter_ownership, group_contacts_by_company,
+                          mark_site_checked, parse_ua_phones,
+                          read_column_widths, read_contacts, read_setting, save_contact,
+                          set_company_ownership, set_phone_status, site_needs_check,
+                          write_setting)
 from pbradar.discovery import (RegionIndex, address_region, extract_business_contacts,
                                inside_polygon, name_region, polygon_contains)
 from pbradar.launcher import safe_version
 
 
 class CoreTests(unittest.TestCase):
+    def test_companies_group_phones_and_matching_edrpou_across_addresses(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with connect_db(Path(temp) / "db.sqlite3") as con:
+                save_contact(con, "ТОВ Альфа", "Будівельні компанії", "Львівська",
+                             "+380671234567", edrpou="12345678")
+                save_contact(con, "ТОВ Альфа", "Будівельні компанії", "Львівська",
+                             "+380501234567", edrpou="12345678")
+                save_contact(con, "ТОВ Альфа, відокремлений підрозділ", "Будівельні компанії",
+                             "Київська", "+380931234567", edrpou="12345678")
+                save_contact(con, "ТОВ Альфа", "Будівельні компанії", "Одеська",
+                             "+380661234567", edrpou="99999999")
+                groups = group_contacts_by_company(read_contacts(con))
+                self.assertEqual(sorted(len(group) for group in groups), [1, 3])
+                big_group = next(group for group in groups if len(group) == 3)
+                self.assertEqual({row["region"] for row in big_group}, {"Львівська", "Київська"})
+                self.assertEqual({row["edrpou"] for row in big_group}, {"12345678"})
+                set_company_ownership(con, big_group[0]["company_id"], "Державна / комунальна")
+                self.assertEqual({row["ownership"] for row in read_contacts(con)
+                                  if row["edrpou"] == "12345678"}, {"Державна / комунальна"})
+                # The manager's decision follows the legal entity into later scans.
+                save_contact(con, "ТОВ Альфа інша філія", "Будівельні компанії", "Рівненська",
+                             "+380991234567", edrpou="12345678", ownership="Приватна")
+                self.assertEqual({row["ownership"] for row in read_contacts(con)
+                                  if row["edrpou"] == "12345678"}, {"Державна / комунальна"})
+                # Shared site does not justify combining different legal entities.
+                save_contact(con, "ТОВ Спільний сайт 1", "Будівельні компанії", "Львівська",
+                             "+380681234567", website="https://shared.example", edrpou="22222222")
+                save_contact(con, "ТОВ Спільний сайт 2", "Будівельні компанії", "Львівська",
+                             "+380971234567", website="https://shared.example", edrpou="33333333")
+                by_phone = {r["phone"]: r for r in read_contacts(con)}
+                self.assertEqual(by_phone["+380681234567"]["edrpou"], "22222222")
+                self.assertEqual(by_phone["+380971234567"]["edrpou"], "33333333")
+
+    def test_ownership_classification_is_conservative_and_manager_override_persists(self):
+        self.assertEqual(classify_ownership("Обласна адміністрація", buyer_kind="authority"),
+                         "Державна / комунальна")
+        self.assertEqual(classify_ownership("КНП лікарня", buyer_kind="general"),
+                         "Державна / комунальна")
+        self.assertEqual(classify_ownership("Комунальне підприємство Світло"),
+                         "Державна / комунальна")
+        self.assertEqual(classify_ownership("ТОВ Будмонтаж"), "Приватна")
+        self.assertEqual(classify_ownership("АТ Енерго", buyer_kind="special"), "Не визначено")
+        self.assertEqual(classify_ownership("Бюро Світанок"), "Не визначено")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "db.sqlite3"
+            with connect_db(path) as con:
+                save_contact(con, "ТОВ Будмонтаж", "Будівельні компанії", "Львівська",
+                             "+380671234567")
+                row = read_contacts(con)[0]
+                self.assertEqual(row["ownership"], "Приватна")
+                set_company_ownership(con, row["company_id"], "Державна / комунальна")
+                save_contact(con, "ТОВ Будмонтаж", "Будівельні компанії", "Львівська",
+                             "+380671234567")
+                self.assertEqual(read_contacts(con)[0]["ownership"], "Державна / комунальна")
+            with connect_db(path) as con:
+                self.assertEqual(filter_ownership(read_contacts(con), "Без державних"), [])
+                self.assertEqual(len(filter_ownership(read_contacts(con), "Державні")), 1)
+
+    def test_prozorro_toggle_keeps_other_source_for_same_phone(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with connect_db(Path(temp) / "db.sqlite3") as con:
+                phone = "+380671234567"
+                save_contact(con, "Відділ освіти", "Відділи закупівель", "Львівська", phone,
+                             source_url="https://prozorro.gov.ua/tender/UA-2026-11-20-000001-a",
+                             ownership="Державна / комунальна")
+                save_contact(con, "ТОВ Будмонтаж", "Будівельні компанії", "Львівська", phone,
+                             source_url="https://example.com/contacts")
+                self.assertEqual(len(read_contacts(con)), 1)
+                filtered = read_contacts(con, include_prozorro=False)
+                self.assertEqual(len(filtered), 1)
+                self.assertEqual(filtered[0]["name"], "ТОВ Будмонтаж")
+                self.assertEqual(filtered[0]["ownership"], "Приватна")
+                self.assertEqual(len(filter_ownership(filtered, "Тільки приватні")), 1)
+                self.assertEqual(len(filter_ownership(read_contacts(con), "Без державних")), 0)
+
+    def test_table_widths_and_source_filters_persist_in_same_database(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "db.sqlite3"
+            with connect_db(path) as con:
+                write_setting(con, "show_prozorro", "0")
+                write_setting(con, "column_widths", '{"name": 320, "phone": 150, "bad": -6}')
+            with connect_db(path) as con:
+                self.assertEqual(read_setting(con, "show_prozorro"), "0")
+                self.assertEqual(read_column_widths(con), {"name": 320, "phone": 150, "bad": 55})
+
+    def test_old_database_migrates_ownership_without_losing_contacts(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "db.sqlite3"
+            with sqlite3.connect(path) as con:
+                con.executescript("""
+                    CREATE TABLE companies (
+                        id INTEGER PRIMARY KEY, company_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+                        category TEXT NOT NULL, region TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
+                        social TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '',
+                        checked_at TEXT NOT NULL DEFAULT '', activity TEXT NOT NULL DEFAULT 'Невідомо');
+                    INSERT INTO companies(company_key,name,category,region)
+                        VALUES('old1','ТОВ Архбюро','Архітектори','Львівська');
+                    CREATE TABLE contacts (
+                        id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, phone TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'Не визначено', status TEXT NOT NULL DEFAULT 'Не опрацьований',
+                        found_at TEXT NOT NULL, checked_at TEXT NOT NULL, source_url TEXT NOT NULL DEFAULT '',
+                        UNIQUE(company_id,phone));
+                    INSERT INTO contacts(company_id,phone,status,found_at,checked_at)
+                        VALUES(1,'+380671234567','Опрацьовано','2026-11-20','2026-11-20');
+                """)
+            with connect_db(path) as con:
+                rows = read_contacts(con)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["ownership"], "Приватна")
+                self.assertEqual(rows[0]["status"], "Опрацьовано")
+
     def test_search_matches_all_contact_fields_and_local_number_format(self):
         rows = [{"name": "АрхБюро Львів", "category": "Архітектори", "region": "Львівська",
                  "phone": "+380671234567", "status": "Опрацьовано",

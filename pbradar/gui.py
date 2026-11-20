@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import json
 import sys
 import queue
 import threading
@@ -17,9 +18,12 @@ from PIL import Image, ImageTk
 
 from . import __version__
 from .branding import red_mark_icon
-from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
-                   connect_db, export_csv, filter_contacts, mark_site_checked, parse_ua_phones,
-                   read_contacts, save_contact, set_phone_status, site_needs_check)
+from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES, OWNERSHIP_FILTERS,
+                   OWNERSHIP_TYPES, company_key, connect_db, export_csv, filter_contacts, filter_ownership,
+                   group_contacts_by_company, mark_site_checked, parse_ua_phones,
+                   read_column_widths, read_contacts,
+                   read_setting, save_contact, set_company_ownership, set_phone_status,
+                   site_needs_check, write_setting)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
@@ -79,12 +83,20 @@ class App(ctk.CTk):
         self.cancel = threading.Event()
         self.working = False
         self.rows: dict[str, dict] = {}
+        self.expanded_groups: set[str] = set()
         self.build_ui()
         self.refresh()
         self.refresh_osm_state()
         self.after(150, self.poll)
 
     def build_ui(self):
+        with connect_db() as con:
+            saved_widths = read_column_widths(con)
+            ownership_mode = read_setting(con, "ownership_filter", OWNERSHIP_FILTERS[0])
+            source_enabled = read_setting(con, "show_prozorro", "1") != "0"
+        self.ownership_mode = tk.StringVar(value=ownership_mode if ownership_mode in OWNERSHIP_FILTERS
+                                           else OWNERSHIP_FILTERS[0])
+        self.show_prozorro = tk.BooleanVar(value=source_enabled)
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT,
@@ -164,6 +176,27 @@ class App(ctk.CTk):
         ctk.CTkLabel(line, text="Статус номера", text_color=MUTED,
                      font=(FONT, 11)).pack(side="right", padx=(0, 10))
 
+        visibility_line = ctk.CTkFrame(panel, fg_color="transparent")
+        visibility_line.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(visibility_line, text="ТИП ОРГАНІЗАЦІЇ", text_color=MUTED,
+                     font=(FONT, 11, "bold")).pack(side="left", padx=(0, 10))
+        self.ownership_filter = ctk.CTkOptionMenu(
+            visibility_line, values=list(OWNERSHIP_FILTERS), variable=self.ownership_mode,
+            command=self.change_visibility, width=170, fg_color="#233a58",
+            button_color="#2d5b81", font=(FONT, 11), dropdown_font=(FONT, 11))
+        self.ownership_filter.pack(side="left", padx=(0, 18))
+        ctk.CTkSwitch(visibility_line, text="Показувати Prozorro", variable=self.show_prozorro,
+                      command=self.change_visibility, progress_color=ACCENT,
+                      button_color="#d5fdf6", font=(FONT, 11)).pack(side="left")
+        self.ownership_selected = ctk.CTkOptionMenu(
+            visibility_line, values=list(OWNERSHIP_TYPES), command=self.change_ownership,
+            width=172, fg_color="#233a58", button_color="#2d5b81",
+            font=(FONT, 11), dropdown_font=(FONT, 11), state="disabled")
+        self.ownership_selected.set(OWNERSHIP_TYPES[2])
+        self.ownership_selected.pack(side="right")
+        ctk.CTkLabel(visibility_line, text="Позначити вибрану:", text_color=MUTED,
+                     font=(FONT, 11)).pack(side="right", padx=(0, 10))
+
         search_line = ctk.CTkFrame(panel, fg_color="transparent")
         search_line.pack(fill="x", padx=16, pady=(0, 10))
         ctk.CTkLabel(search_line, text="ПОШУК В БАЗІ", text_color=MUTED,
@@ -173,34 +206,86 @@ class App(ctk.CTk):
         self.search_var.trace_add("write", self.schedule_search)
         self.button(search_line, "Очистити", lambda: self.search_var.set(""), PANEL_RAISED,
                     width=80, height=32, side="right")
+        self.button(search_line, "Скинути ширину", self.reset_column_widths, PANEL_RAISED,
+                    width=125, height=32, side="right")
         ctk.CTkEntry(search_line, textvariable=self.search_var,
-                     placeholder_text="Компанія, телефон, область, категорія, статус, сайт, соцмережа…",
+                     placeholder_text="Компанія, телефон, область, тип, категорія, статус, сайт…",
                      fg_color="#0d1727", border_color="#29445f", height=34,
                      font=(FONT, 11)).pack(side="left", fill="x", expand=True)
 
-        cols = ("mark", "name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
-        headers = ("✓", "Компанія", "Категорія", "Область", "Телефон", "Призначення",
+        cols = ("mark", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
+        headers = ("✓", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
-        widths = (45, 170, 150, 115, 145, 105, 150, 145, 130, 170)
+        widths = (45, 200, 160, 125, 165, 100, 150, 145, 150, 145, 155, 190)
+        self.default_column_widths = dict(zip(cols, widths))
         table_box = tk.Frame(panel, bg=PANEL, highlightthickness=0)
         table_box.pack(fill="both", expand=True, padx=12)
-        self.table = ttk.Treeview(table_box, columns=cols, show="headings", selectmode="browse")
+        self.table = ttk.Treeview(table_box, columns=cols, show="tree headings", selectmode="browse")
+        self.table.heading("#0", text="")
+        self.table.column("#0", width=29, minwidth=29, stretch=False)
         for col, title, width in zip(cols, headers, widths):
             self.table.heading(col, text=title)
-            self.table.column(col, width=width, minwidth=40 if col == "mark" else 90,
+            self.table.column(col, width=saved_widths.get(col, width), minwidth=40 if col == "mark" else 65,
                               anchor="center" if col == "mark" else "w",
-                              stretch=(col in ("name", "website")))
+                              stretch=False)
         vert = ttk.Scrollbar(table_box, orient="vertical", command=self.table.yview)
         hor = ttk.Scrollbar(table_box, orient="horizontal", command=self.table.xview)
         self.table.configure(yscrollcommand=vert.set, xscrollcommand=hor.set)
         vert.pack(side="right", fill="y")
         hor.pack(side="bottom", fill="x")
         self.table.pack(fill="both", expand=True)
+        self._dragging_separator = False
+        self.table.bind("<ButtonPress-1>", self.note_column_drag)
         self.table.bind("<ButtonRelease-1>", self.toggle_from_click)
+        self.table.bind("<ButtonRelease-1>", self.save_resized_columns, add="+")
         self.table.bind("<<TreeviewSelect>>", self.sync_status)
+        self.table.bind("<<TreeviewOpen>>", self.record_group_open)
+        self.table.bind("<<TreeviewClose>>", self.record_group_close)
         self.table.bind("<Double-1>", self.open_selected)
-        ctk.CTkLabel(panel, text="☐ / ☑ — змінити статус  ·  Двічі на номер — копіювати  ·  Двічі на рядок — відкрити джерело",
+        ctk.CTkLabel(panel, text="▶ Розгорнути номери фірми  ·  ☐ / ☑ — змінити статус  ·  Перетягни межу заголовка для зміни ширини",
                      text_color=MUTED, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(5, 9))
+
+    def note_column_drag(self, event):
+        self._dragging_separator = self.table.identify_region(event.x, event.y) == "separator"
+
+    def save_resized_columns(self, _event=None):
+        if self._dragging_separator:
+            self._dragging_separator = False
+            # Tk adjusts the actual column width after button release.
+            self.after(80, self.persist_column_widths)
+
+    def persist_column_widths(self):
+        widths = {col: self.table.column(col, "width") for col in self.table["columns"]}
+        with connect_db() as con:
+            write_setting(con, "column_widths", json.dumps(widths, ensure_ascii=False))
+
+    def reset_column_widths(self):
+        for col, width in self.default_column_widths.items():
+            self.table.column(col, width=width)
+        self.persist_column_widths()
+
+    def record_group_open(self, _event=None):
+        self.expanded_groups.add(self.table.focus())
+
+    def record_group_close(self, _event=None):
+        self.expanded_groups.discard(self.table.focus())
+
+    def change_visibility(self, _value=None):
+        with connect_db() as con:
+            write_setting(con, "ownership_filter", self.ownership_mode.get())
+            write_setting(con, "show_prozorro", "1" if self.show_prozorro.get() else "0")
+        self.refresh()
+
+    def change_ownership(self, _value=None):
+        selected = self.table.selection()
+        if not selected or selected[0] not in self.rows:
+            return
+        row = self.rows[selected[0]]
+        ownership = self.ownership_selected.get()
+        with connect_db() as con:
+            set_company_ownership(con, row["company_id"], ownership)
+        self.refresh()
+        self.status_text.set(f"{row['name']}: {ownership} · позначено вручну")
 
     def _filter_panel(self, parent, column, title, options):
         card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=15)
@@ -449,30 +534,70 @@ class App(ctk.CTk):
         self._search_after = None
         with connect_db() as con:
             all_rows = read_contacts(con)
-        values = [row for row in all_rows if row["status"] == "Не опрацьований"] if self.only_new.get() else all_rows
+            source_rows = read_contacts(con, include_prozorro=self.show_prozorro.get())
+        source_rows = filter_ownership(source_rows, self.ownership_mode.get())
+        values = [row for row in source_rows if row["status"] == "Не опрацьований"] if self.only_new.get() else source_rows
         values = filter_contacts(values, self.search_var.get())
+        groups = group_contacts_by_company(values)
         for id_ in self.table.get_children():
             self.table.delete(id_)
         self.rows = {}
-        for position, row in enumerate(values):
-            id_ = str(row["id"])
-            self.rows[id_] = row
-            values_for_row = ("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
-                row.get(k, "") for k in
-                ("name", "category", "region", "phone", "role", "activity", "checked_at", "status")) + (
-                row.get("website") or row.get("social") or row.get("source_url") or "",)
-            self.table.insert("", "end", iid=id_, values=values_for_row,
-                              tags=("even" if position % 2 == 0 else "odd",))
+        for position, entries in enumerate(groups):
+            row = entries[0]
+            tag = "even" if position % 2 == 0 else "odd"
+            if len(entries) == 1:
+                id_ = "contact:" + str(row["id"])
+                self.rows[id_] = row
+                self.table.insert("", "end", iid=id_, values=self.contact_values(row), tags=(tag,))
+                continue
+            group_id = ("group:edr:" + row["edrpou"]) if row.get("edrpou") else (
+                "group:company:" + str(row["company_id"]))
+            self.rows[group_id] = {**row, "is_group": True}
+            reviewed_in_group = sum(item["status"] != "Не опрацьований" for item in entries)
+            label = f"{len(entries)} номери · {reviewed_in_group} опрацьовано"
+            regions_in_group = list(dict.fromkeys(item["region"] for item in entries))
+            region_label = regions_in_group[0] if len(regions_in_group) == 1 else f"{len(regions_in_group)} області"
+            self.table.insert("", "end", iid=group_id, open=group_id in self.expanded_groups,
+                              values=("", row["name"], row["category"], region_label,
+                                      row["ownership"], row.get("edrpou", ""), label, "", row["activity"], "", "",
+                                      row.get("website") or row.get("social") or row.get("source_url") or ""),
+                              tags=(tag, "group"))
+            for item in entries:
+                child_id = "contact:" + str(item["id"])
+                self.rows[child_id] = item
+                child_values = list(self.contact_values(item))
+                child_values[1] = ""
+                child_values[2] = ""
+                child_values[4] = ""
+                child_values[5] = ""
+                self.table.insert(group_id, "end", iid=child_id, values=child_values,
+                                  tags=("child",))
         self.table.tag_configure("even", background=PANEL)
         self.table.tag_configure("odd", background="#17253a")
+        self.table.tag_configure("group", foreground="#f3f7fe")
+        self.table.tag_configure("child", background="#0e1a2b", foreground="#b7c9e1")
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
-        self.count_text.set(f"Показано: {len(values)}    ·    Нові: {len(all_rows) - reviewed}    ·    "
+        self.count_text.set(f"Фірм: {len(groups)}  ·  Номерів: {len(values)}  ·  Нові: {len(all_rows) - reviewed}  ·  "
                             f"Опрацьовані: {reviewed}    ·    Усього: {len(all_rows)}")
+
+    @staticmethod
+    def contact_values(row):
+        return (("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
+            row.get(k, "") for k in
+            ("name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status")) +
+            (row.get("website") or row.get("social") or row.get("source_url") or "",))
 
     def sync_status(self, _event=None):
         selected = self.table.selection()
         if selected and selected[0] in self.rows:
-            self.status_box.set(self.rows[selected[0]]["status"])
+            row = self.rows[selected[0]]
+            self.status_box.set(row["status"] if not row.get("is_group") else STATUSES[0])
+            self.status_box.configure(state="disabled" if row.get("is_group") else "normal")
+            self.ownership_selected.set(self.rows[selected[0]]["ownership"])
+            self.ownership_selected.configure(state="normal")
+        else:
+            self.status_box.configure(state="disabled")
+            self.ownership_selected.configure(state="disabled")
 
     def toggle_from_click(self, event):
         if self.table.identify_column(event.x) != "#1":
@@ -481,6 +606,8 @@ class App(ctk.CTk):
         if not row_id or row_id not in self.rows:
             return
         row = self.rows[row_id]
+        if row.get("is_group"):
+            return
         new_status = "Опрацьовано" if row["status"] == "Не опрацьований" else "Не опрацьований"
         with connect_db() as con:
             set_phone_status(con, row["phone"], new_status)
@@ -491,6 +618,8 @@ class App(ctk.CTk):
     def change_status(self, _event=None):
         selected = self.table.selection()
         if not selected or selected[0] not in self.rows:
+            return
+        if self.rows[selected[0]].get("is_group"):
             return
         phone = self.rows[selected[0]]["phone"]
         new_status = self.status_box.get()
@@ -503,9 +632,19 @@ class App(ctk.CTk):
         selected = self.table.selection()
         if selected:
             row = self.rows.get(selected[0], {})
+            if row.get("is_group"):
+                if event and self.table.identify_region(event.x, event.y) == "tree":
+                    return  # The native expand-arrow handler already does this.
+                is_open = bool(self.table.item(selected[0], "open"))
+                self.table.item(selected[0], open=not is_open)
+                if is_open:
+                    self.expanded_groups.discard(selected[0])
+                else:
+                    self.expanded_groups.add(selected[0])
+                return
             if event and self.table.identify_column(event.x) == "#1":
                 return
-            if event and self.table.identify_column(event.x) == "#5":
+            if event and self.table.identify_column(event.x) == "#7":
                 self.clipboard_clear()
                 self.clipboard_append(row.get("phone", ""))
                 self.status_text.set("Номер скопійовано: " + row.get("phone", ""))
@@ -529,13 +668,25 @@ class App(ctk.CTk):
                     if not name:
                         continue
                     raw = row.get("phone") or row.get("Телефон") or ""
+                    region = row.get("region", "Не визначено")
+                    website = row.get("website", "")
+                    imported_ownership = (row.get("ownership") or "").strip()
+                    edrpou = (row.get("edrpou") or "").strip()
                     for phone in parse_ua_phones(raw):
                         count += save_contact(con, name, row.get("category", "Імпорт"),
-                                              row.get("region", "Не визначено"), phone,
-                                              row.get("website", ""), row.get("source_url", ""))
+                                              region, phone, website, row.get("source_url", ""),
+                                              ownership=imported_ownership, edrpou=edrpou)
                         imported_status = (row.get("status") or "").strip()
                         if imported_status in STATUSES and imported_status != "Не опрацьований":
                             set_phone_status(con, phone, imported_status)
+                    if imported_ownership in OWNERSHIP_TYPES:
+                        company = (con.execute("SELECT id FROM companies WHERE edrpou=? LIMIT 1", (edrpou,)).fetchone()
+                                   if edrpou else None)
+                        if not company:
+                            company = con.execute("SELECT id FROM companies WHERE company_key=?",
+                                                  (company_key(name, website, region),)).fetchone()
+                        if company:
+                            set_company_ownership(con, company[0], imported_ownership)
             self.refresh()
             messagebox.showinfo("Імпорт завершено", f"Додано нових контактів: {count}")
         except (OSError, UnicodeError, csv.Error) as exc:
@@ -547,7 +698,9 @@ class App(ctk.CTk):
                                             initialfile="PB-Radar-contacts-" + dt.date.today().isoformat() + ".csv")
         if path:
             with connect_db() as con:
-                rows = read_contacts(con, ("Не опрацьований",) if self.only_new.get() else ())
+                rows = read_contacts(con, ("Не опрацьований",) if self.only_new.get() else (),
+                                     include_prozorro=self.show_prozorro.get())
+            rows = filter_ownership(rows, self.ownership_mode.get())
             rows = filter_contacts(rows, self.search_var.get())
             export_csv(Path(path), rows)
             messagebox.showinfo("Експорт", f"Збережено {len(rows)} контактів.")

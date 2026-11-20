@@ -15,7 +15,7 @@ from pathlib import Path
 
 import requests
 
-from .core import (CATEGORIES, DB_PATH, REGIONS, connect_db, normalize_url,
+from .core import (CATEGORIES, DB_PATH, REGIONS, classify_ownership, connect_db, normalize_url,
                    parse_ua_phones, save_contact)
 from .discovery import address_region
 
@@ -104,10 +104,14 @@ def extract_tender_contacts(tender: dict, categories: set[str],
             return
         identifier = party.get("identifier") or {}
         website = normalize_url(str(point.get("uri") or identifier.get("uri") or ""))
+        edrpou = str(identifier.get("id") or "").strip() if identifier.get("scheme") == "UA-EDR" else ""
+        ownership = classify_ownership(name, buyer_kind=str(party.get("kind") or "") if
+                                       role == "Закупівлі (Prozorro)" else "")
         for phone in phones:
             result.append({"name": name, "category": category, "region": region,
                            "phone": phone, "website": website, "source_url": source,
-                           "role": role, "activity": "Prozorro · " + (published or "без дати")})
+                           "role": role, "activity": "Prozorro · " + (published or "без дати"),
+                           "ownership": ownership, "edrpou": edrpou})
 
     if "Відділи закупівель" in categories:
         add_party(tender.get("procuringEntity") or {}, "Відділи закупівель", "Закупівлі (Prozorro)")
@@ -217,7 +221,8 @@ def scan_prozorro(categories: set[str], regions: set[str], *,
                         seen_records.add(identity)
                         new += save_contact(con, row["name"], row["category"], row["region"],
                                             row["phone"], row["website"], row["source_url"],
-                                            row["activity"], row["role"])
+                                            row["activity"], row["role"],
+                                            ownership=row["ownership"], edrpou=row["edrpou"])
                         found += 1
                 examined += len(rows)
                 next_offset = str((feed.get("next_page") or {}).get("offset") or "")
