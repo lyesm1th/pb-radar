@@ -107,10 +107,10 @@ class App(tk.Tk):
         self.status_box.pack(side="right")
         self.status_box.bind("<<ComboboxSelected>>", self.change_status)
 
-        cols = ("name", "category", "region", "phone", "role", "activity", "status", "website")
+        cols = ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")
         headers = ("Компанія", "Категорія", "Область", "Телефон", "Призначення",
-                   "Активність", "Статус", "Сайт / посилання")
-        widths = (170, 150, 115, 145, 105, 150, 130, 170)
+                   "Активність", "Перевірено", "Статус", "Сайт / посилання")
+        widths = (170, 150, 115, 145, 105, 150, 145, 130, 170)
         self.table = ttk.Treeview(panel, columns=cols, show="headings", selectmode="browse")
         for col, title, width in zip(cols, headers, widths):
             self.table.heading(col, text=title)
@@ -122,7 +122,7 @@ class App(tk.Tk):
         hor.pack(side="bottom", fill="x")
         self.table.pack(fill="both", expand=True)
         self.table.bind("<Double-1>", self.open_selected)
-        tk.Label(panel, text="Подвійний клік — відкрити джерело. Контакти зберігаються локально й не зникають після оновлення.",
+        tk.Label(panel, text="Подвійний клік по номеру — скопіювати; по іншому полю — відкрити джерело. Дані зберігаються локально.",
                  fg="#657995", bg="#f8fafc", font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
 
     @staticmethod
@@ -265,7 +265,7 @@ class App(tk.Tk):
             id_ = str(row["id"])
             self.rows[id_] = row
             self.table.insert("", "end", iid=id_, values=tuple(row.get(k, "") for k in
-                              ("name", "category", "region", "phone", "role", "activity", "status", "website")))
+                              ("name", "category", "region", "phone", "role", "activity", "checked_at", "status", "website")))
         self.count_text.set(f"Контакти: {len(values)}")
 
     def change_status(self, _event=None):
@@ -276,10 +276,15 @@ class App(tk.Tk):
             con.execute("UPDATE contacts SET status=? WHERE id=?", (self.status_box.get(), int(selected[0])))
         self.refresh()
 
-    def open_selected(self, _event=None):
+    def open_selected(self, event=None):
         selected = self.table.selection()
         if selected:
             row = self.rows.get(selected[0], {})
+            if event and self.table.identify_column(event.x) == "#4":
+                self.clipboard_clear()
+                self.clipboard_append(row.get("phone", ""))
+                self.status_text.set("Номер скопійовано: " + row.get("phone", ""))
+                return
             url = row.get("source_url") or row.get("website")
             if url:
                 webbrowser.open(url)

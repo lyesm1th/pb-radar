@@ -95,9 +95,19 @@ def normalize_url(value: str) -> str:
 
 
 def company_key(name: str, website: str, region: str) -> str:
-    host = urlparse(normalize_url(website)).hostname or ""
+    parsed = urlparse(normalize_url(website))
+    host = parsed.hostname or ""
     if host:
         host = re.sub(r"^www\.", "", host.lower())
+        # A social platform hosts thousands of unrelated companies. Domain alone
+        # would collapse them into one record and silently lose their contacts.
+        shared_hosts = {"facebook.com", "instagram.com", "linkedin.com", "behance.net",
+                        "t.me", "sites.google.com", "linktr.ee", "youtube.com"}
+        if host in shared_hosts:
+            path = parsed.path.strip("/").lower()
+            if path:
+                return f"web:{host}/{path}"
+            return f"name:{re.sub(r'\W+', '', name.lower())}:{region.lower()}"
         return f"web:{host}"
     normalized = re.sub(r"\W+", "", name.lower(), flags=re.UNICODE)
     return f"name:{normalized}:{region.lower()}"

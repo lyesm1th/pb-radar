@@ -20,6 +20,8 @@ class CoreTests(unittest.TestCase):
     def test_company_url_key(self):
         self.assertEqual(company_key("Студія", "https://www.sample.ua/contacts", "Львівська"),
                          "web:sample.ua")
+        self.assertNotEqual(company_key("Студія A", "https://facebook.com/studio_a", "Львівська"),
+                            company_key("Студія Б", "https://facebook.com/studio_b", "Львівська"))
 
     def test_database_preserves_status(self):
         with tempfile.TemporaryDirectory() as temp:
