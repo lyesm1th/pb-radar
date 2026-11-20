@@ -25,6 +25,74 @@ OSM_DATED_URL = "https://download.geofabrik.de/europe/ukraine/ukraine-{}.osm.pbf
 OSM_MIRROR_URL = "https://download.openstreetmap.fr/extracts/europe/ukraine-latest.osm.pbf"
 OSM_DOWNLOAD_HOSTS = {"download.geofabrik.de", "download.openstreetmap.fr"}
 
+# OSM uses both `phone=*` and `contact:phone=*`, with several field variants.
+# Fax and SMS-only fields are deliberately excluded from callable numbers.
+BUSINESS_PHONE_FIELDS = frozenset((
+    "phone", "contact:phone", "mobile", "contact:mobile", "telephone",
+    "contact:telephone", "phone:mobile", "contact:whatsapp", "whatsapp",
+    "contact:viber", "viber",
+))
+BUSINESS_WEB_FIELDS = ("contact:website", "website", "website:1", "contact:url", "url")
+BUSINESS_SOCIAL_FIELDS = (
+    ("contact:facebook", "facebook.com"), ("facebook", "facebook.com"),
+    ("contact:instagram", "instagram.com"), ("instagram", "instagram.com"),
+    ("contact:linkedin", "linkedin.com"), ("linkedin", "linkedin.com"),
+    ("contact:telegram", "t.me"), ("telegram", "t.me"),
+)
+SOCIAL_HOSTS = {"facebook.com", "www.facebook.com", "instagram.com", "www.instagram.com",
+                "linkedin.com", "www.linkedin.com", "t.me", "x.com", "twitter.com"}
+
+
+def extract_business_contacts(tags: dict[str, str]) -> tuple[list[str], str, str]:
+    """Normalize public business phone, official website and social OSM tags."""
+    phones = []
+    for key, value in tags.items():
+        if (key.lower() in BUSINESS_PHONE_FIELDS or
+                re.fullmatch(r"(?:contact:)?(?:phone|mobile):[1-9]\d*", key.lower())):
+            # Separate tag values: the phone parser can otherwise mistake two
+            # adjacent formatted numbers for one impossible long number.
+            for part in re.split(r"[;|\n]+", value):
+                for number in parse_ua_phones(part):
+                    if number not in phones:
+                        phones.append(number)
+    website = ""
+    social = ""
+    for field in BUSINESS_WEB_FIELDS:
+        candidate = normalize_url(tags.get(field, ""))
+        if not candidate:
+            continue
+        if urlparse(candidate).hostname.lower() in SOCIAL_HOSTS:
+            social = social or candidate
+        else:
+            website = candidate
+            break
+    for field, host in BUSINESS_SOCIAL_FIELDS:
+        raw = tags.get(field, "").strip()
+        if not raw:
+            continue
+        if raw.startswith("@"):
+            candidate = normalize_url(f"https://{host}/{raw[1:]}")
+        elif "://" not in raw and "." not in raw and "/" not in raw:
+            candidate = normalize_url(f"https://{host}/{raw}")
+        else:
+            candidate = normalize_url(raw)
+        if candidate and urlparse(candidate).hostname.lower() in SOCIAL_HOSTS:
+            social = social or candidate
+    return phones, website, social
+
+
+def osm_business_name(tags: dict[str, str], osm_id: int) -> str:
+    """Retain explicitly tagged commercial POIs even if the `name` field is absent."""
+    for key in ("name", "name:uk", "brand", "operator", "name:en", "name:ru"):
+        if value := tags.get(key, "").strip():
+            return value
+    office = tags.get("office", "")
+    craft = tags.get("craft", "")
+    company = tags.get("company", "")
+    if office not in {"", "company"} or craft or company:
+        return f"Без назви · {office or craft or company} (OSM #{osm_id})"
+    return ""
+
 
 def resolve_osm_url(progress=None, now: dt.datetime | None = None) -> str:
     """Get a direct, dated Geofabrik URL without following its broken latest alias.
@@ -205,6 +273,47 @@ def name_region(value: str) -> str:
     return "Не визначено"
 
 
+# Oblast capitals are unambiguous enough to use when ways/relations carry
+# `addr:city` but no `addr:region`. Other towns are not guessed from their name.
+CAPITAL_CITIES = {
+    "львів": "Львівська", "львов": "Львівська", "lviv": "Львівська",
+    "київ": "м. Київ", "киев": "м. Київ", "kyiv": "м. Київ", "kiev": "м. Київ",
+    "дніпро": "Дніпропетровська", "днепр": "Дніпропетровська", "dnipro": "Дніпропетровська",
+    "харків": "Харківська", "харьков": "Харківська", "kharkiv": "Харківська",
+    "одеса": "Одеська", "одесса": "Одеська", "odesa": "Одеська", "odessa": "Одеська",
+    "вінниця": "Вінницька", "vinnytsia": "Вінницька",
+    "луцьк": "Волинська", "lutsk": "Волинська",
+    "житомир": "Житомирська", "zhytomyr": "Житомирська",
+    "ужгород": "Закарпатська", "uzhhorod": "Закарпатська",
+    "запоріжжя": "Запорізька", "запорожье": "Запорізька", "zaporizhzhia": "Запорізька",
+    "івано-франківськ": "Івано-Франківська", "ivano-frankivsk": "Івано-Франківська",
+    "кропивницький": "Кіровоградська", "kropyvnytskyi": "Кіровоградська",
+    "луганськ": "Луганська", "луганск": "Луганська", "luhansk": "Луганська",
+    "миколаїв": "Миколаївська", "николаев": "Миколаївська", "mykolaiv": "Миколаївська",
+    "полтава": "Полтавська", "poltava": "Полтавська",
+    "рівне": "Рівненська", "ровно": "Рівненська", "rivne": "Рівненська",
+    "суми": "Сумська", "sumy": "Сумська",
+    "тернопіль": "Тернопільська", "ternopil": "Тернопільська",
+    "херсон": "Херсонська", "kherson": "Херсонська",
+    "хмельницький": "Хмельницька", "khmelnytskyi": "Хмельницька",
+    "черкаси": "Черкаська", "cherkasy": "Черкаська",
+    "чернівці": "Чернівецька", "chernivtsi": "Чернівецька",
+    "чернігів": "Чернігівська", "chernihiv": "Чернігівська",
+    "донецьк": "Донецька", "донецк": "Донецька", "donetsk": "Донецька",
+    "сімферополь": "АР Крим", "симферополь": "АР Крим", "simferopol": "АР Крим",
+    "севастополь": "м. Севастополь", "sevastopol": "м. Севастополь",
+}
+
+
+def address_region(tags: dict[str, str]) -> str:
+    for field in ("addr:region", "addr:state", "is_in:state", "addr:province"):
+        region = name_region(tags.get(field, ""))
+        if region != "Не визначено":
+            return region
+    city = tags.get("addr:city", "").strip().lower()
+    return CAPITAL_CITIES.get(city, "Не визначено")
+
+
 def inside_polygon(lon: float, lat: float, ring: list) -> bool:
     """Ray casting using GeoJSON's [longitude, latitude] axis order."""
     found = False
@@ -371,12 +480,9 @@ def read_site_numbers(url: str, reader: WebsiteReader) -> tuple[dict[str, str], 
 
 
 def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regions: set[str],
-                   regions: RegionIndex, progress=None, limit=1500, cancel: threading.Event | None = None):
-    """Scan public POIs; sample across the whole country instead of PBF file order.
-
-    Region of a way is accepted only if explicit in tags. This prevents guessing
-    its location from a bounding rectangle across administrative borders.
-    """
+                   regions: RegionIndex, progress=None, limit: int | None = None,
+                   cancel: threading.Event | None = None):
+    """Compatibility direct scanner; the GUI normally uses the cached index."""
     import osmium
 
     matches = []
@@ -390,7 +496,7 @@ def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regio
             if cancel and cancel.is_set():
                 raise InterruptedError("Пошук зупинено")
             tags = dict(obj.tags)
-            name = tags.get("name", "").strip()
+            name = osm_business_name(tags, obj.id)
             if not name:
                 return
             groups = classify(name, tags) & selected_categories
@@ -398,16 +504,15 @@ def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regio
                 return
             if selected_regions and region not in selected_regions:
                 return
-            phones = parse_ua_phones(tags.get("contact:phone", "") + " " + tags.get("phone", ""))
-            website = normalize_url(tags.get("contact:website") or tags.get("website") or "")
+            phones, website, social = extract_business_contacts(tags)
             if not phones and not website:
                 return
             osm_type = {"n": "node", "w": "way", "r": "relation"}.get(obj.type_str(), obj.type_str())
             item = {"name": name, "category": ", ".join(sorted(groups)),
-                    "region": region, "website": website, "phones": phones,
+                    "region": region, "website": website, "social": social, "phones": phones,
                     "source_url": f"https://www.openstreetmap.org/{osm_type}/{obj.id}"}
             self.seen += 1
-            if len(matches) < limit:
+            if limit is None or len(matches) < limit:
                 matches.append(item)
             else:
                 slot = rnd.randrange(self.seen)
@@ -425,21 +530,29 @@ def find_osm_leads(osm_path: Path, selected_categories: set[str], selected_regio
                     progress(f"Перевірено {self.scanned:,} картографічних об'єктів · кандидатів: {self.seen}")
             if not node.location.valid():
                 return
-            name = node.tags.get("name")
+            tags = dict(node.tags)
+            name = osm_business_name(tags, node.id)
             if not name:
                 return
-            # Important for the 800+ MB Ukraine extract: point-in-polygon is
-            # expensive. Only calculate oblasts for relevant business POIs.
-            small_tags = {field: node.tags.get(field, "") for field in
-                          ("description", "office", "craft", "name:en")}
-            if not (classify(name, small_tags) & selected_categories):
+            if not (classify(name, tags) & selected_categories):
                 return
             self._process(node, regions.at(node.location.lon, node.location.lat))
 
         def way(self, way):
             tags = dict(way.tags)
-            region = name_region(tags.get("addr:region", "") or tags.get("addr:state", ""))
+            name = osm_business_name(tags, way.id)
+            if not name or not (classify(name, tags) & selected_categories):
+                return
+            region = address_region(tags)
+            if region == "Не визначено":
+                for ref in way.nodes:
+                    if ref.location.valid():
+                        region = regions.at(ref.location.lon, ref.location.lat)
+                        break
             self._process(way, region)
 
-    Handler().apply_file(str(osm_path), locations=False)
+        def relation(self, relation):
+            self._process(relation, address_region(dict(relation.tags)))
+
+    Handler().apply_file(str(osm_path), locations=True, idx="flex_mem")
     return matches

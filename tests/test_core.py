@@ -1,10 +1,13 @@
 import tempfile
 import unittest
+import datetime as dt
 from pathlib import Path
 
 from pbradar.core import (classify, company_key, connect_db, export_csv,
-                          parse_ua_phones, read_contacts, save_contact, set_phone_status)
-from pbradar.discovery import RegionIndex, inside_polygon, name_region, polygon_contains
+                          mark_site_checked, parse_ua_phones, read_contacts, save_contact,
+                          set_phone_status, site_needs_check)
+from pbradar.discovery import (RegionIndex, address_region, extract_business_contacts,
+                               inside_polygon, name_region, polygon_contains)
 from pbradar.launcher import safe_version
 
 
@@ -17,6 +20,41 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Архітектурні бюро", classify("Студія", {"office": "architect"}))
         self.assertIn("Будівельні компанії", classify("Компанія", {"office": "construction_company"}))
         self.assertNotIn("Відділи закупівель", classify("Компанія", {"office": "construction_company"}))
+
+    def test_expanded_osm_business_tags_without_false_buildings(self):
+        checks = (
+            ({"company": "construction"}, "Будівельні компанії"),
+            ({"office": "engineer"}, "Проєктні організації"),
+            ({"craft": "window_construction"}, "Монтажні організації"),
+            ({"craft": "metal_construction"}, "Металоконструкції"),
+            ({"craft": "interior_designer"}, "Дизайнери інтер'єру"),
+            ({"office": "property_developer"}, "Забудовники"),
+        )
+        for tags, category in checks:
+            with self.subTest(tags=tags):
+                self.assertIn(category, classify("ТОВ Фірма", tags))
+        for tags in ({"landuse": "industrial"}, {"building": "warehouse"},
+                     {"landuse": "construction"}, {"office": "company"}):
+            with self.subTest(negative=tags):
+                self.assertEqual(classify("Звичайна фірма", tags), set())
+        self.assertNotIn("Підрядники приватного будівництва",
+                         classify("Приватний дитячий садок", {}))
+
+    def test_osm_phone_variants_social_and_capital_regions(self):
+        phones, website, social = extract_business_contacts({
+            "contact:mobile": "+380 67 123 45 67",
+            "phone:2": "050 123 45 67",
+            "contact:phone": "044 123 45 67",
+            "contact:fax": "044 123 45 68",
+            "website": "https://example.ua",
+            "contact:instagram": "@build_studio",
+        })
+        self.assertEqual(set(phones), {"+380671234567", "+380501234567", "+380441234567"})
+        self.assertEqual(website, "https://example.ua")
+        self.assertEqual(social, "https://instagram.com/build_studio")
+        self.assertEqual(address_region({"addr:city": "Львів"}), "Львівська")
+        self.assertEqual(address_region({"addr:city": "Київ"}), "м. Київ")
+        self.assertEqual(address_region({"addr:city": "Біла Церква"}), "Не визначено")
 
     def test_company_url_key(self):
         self.assertEqual(company_key("Студія", "https://www.sample.ua/contacts", "Львівська"),
@@ -37,6 +75,19 @@ class CoreTests(unittest.TestCase):
                 rows = read_contacts(db)
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["status"], "Не контактувати")
+
+    def test_websites_are_recorded_once_and_checked_again_on_schedule(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with connect_db(Path(temp) / "contacts.sqlite3") as db:
+                url = "https://architecture.example"
+                self.assertTrue(site_needs_check(db, url))
+                mark_site_checked(db, url, 3)
+                self.assertFalse(site_needs_check(db, url))
+                week_later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=8)
+                self.assertTrue(site_needs_check(db, url, now=week_later))
+                mark_site_checked(db, url, 0)
+                two_days = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+                self.assertTrue(site_needs_check(db, url, now=two_days))
 
     def test_reviewed_number_hidden_after_second_search_and_new_company(self):
         with tempfile.TemporaryDirectory() as temp:

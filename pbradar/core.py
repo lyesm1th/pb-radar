@@ -44,34 +44,60 @@ CONTACT_STATUSES = (
 RULES = {
     "Архітектори": ("архітектор", "архитектор", "architect"),
     "Архітектурні бюро": ("архітектурн", "архитектурн", "architectural", "architecture"),
-    "Дизайнери інтер'єру": ("інтер'єр", "интерьер", "interior"),
-    "Дизайнери екстер'єру": ("екстер'єр", "экстерьер", "exterior"),
-    "Ландшафтні дизайнери": ("ландшафт", "landscap"),
-    "Забудовники": ("забудовник", "девелоп", "developer", "development"),
-    "Генпідрядні організації": ("генпідряд", "генподряд", "general contractor"),
-    "Будівельні компанії": ("будівельн", "строительн", "construction", "будівництв"),
+    "Дизайнери інтер'єру": ("інтер'єр", "інтер’єр", "интерьер", "interior design", "interior architect"),
+    "Дизайнери екстер'єру": ("екстер'єр", "екстер’єр", "экстерьер", "exterior design"),
+    "Ландшафтні дизайнери": ("ландшафтн", "ландшафтний дизайн", "landscape design", "landscape architect"),
+    "Забудовники": ("забудовник", "девелопер", "девелопмент", "real estate developer", "property development"),
+    "Генпідрядні організації": ("генпідряд", "генподряд", "general contractor", "генеральний підряд"),
+    "Будівельні компанії": ("будівельн", "строительн", "construction company", "будівництв", "стройкомпан", "будсервіс"),
     "Виконроби": ("виконроб", "прораб", "site foreman"),
-    "Проєктні організації": ("проєктн", "проектн", "engineering", "проектуван"),
-    "Відділи закупівель": ("відділ закупів", "отдел закуп", "procurement"),
-    "Монтажні організації": ("монтаж", "installation"),
-    "Підрядники приватного будівництва": ("котедж", "приватн", "cottage", "house building"),
-    "Промислове будівництво": ("промислов", "промышлен", "industrial"),
-    "Будівництво складів": ("складськ", "складов", "warehouse", "logistics"),
-    "Металоконструкції": ("металоконструк", "металлоконструк", "steel structure"),
-    "Протипожежні системи": ("протипожеж", "пожежн", "fire protect"),
+    "Проєктні організації": ("проєктуван", "проектуван", "проєктн", "проектн", "інжиніринг", "инжиниринг", "engineering firm"),
+    "Відділи закупівель": ("відділ закупів", "отдел закуп", "procurement department", "тендерний відділ"),
+    "Монтажні організації": ("монтажн", "монтажні", "будмонтаж", "installation contractor"),
+    "Підрядники приватного будівництва": ("котеджне будівництво", "будівництво котедж", "будівництво будинків", "house builder", "home builder"),
+    "Промислове будівництво": ("промислове будівництво", "промышленное строительство", "industrial construction"),
+    "Будівництво складів": ("будівництво складів", "складське будівництво", "warehouse construction"),
+    "Металоконструкції": ("металоконструк", "металлоконструк", "steel structure", "steel fabrication"),
+    "Протипожежні системи": ("протипожеж", "пожежна сигналіз", "пожарная сигнализ", "fire protection", "fire safety system"),
 }
 
 
 def classify(name: str, tags: dict[str, str]) -> set[str]:
-    blob = " ".join([name, tags.get("description", ""), tags.get("office", ""),
-                     tags.get("craft", ""), tags.get("name:en", "")]).lower()
+    # Tags describing a site/building (e.g. landuse=industrial, building=warehouse)
+    # are NOT evidence that the site operator builds such structures for clients.
+    blob = " ".join([name, *(tags.get(field, "") for field in (
+        "description", "name:en", "name:uk", "name:ru", "brand", "operator",
+        "company", "business", "service"))]).lower()
     groups = {cat for cat, words in RULES.items() if any(w in blob for w in words)}
-    if tags.get("office") == "architect":
+    office = tags.get("office", "").lower()
+    craft = tags.get("craft", "").lower()
+    company = tags.get("company", "").lower()
+    if office in {"architect", "architecture"}:
         groups.update(("Архітектори", "Архітектурні бюро"))
-    if tags.get("office") == "construction_company":
+    if office in {"construction", "construction_company", "building_contractor"} or company == "construction":
         groups.add("Будівельні компанії")
-    if tags.get("craft") in ("builder", "roofer"):
+    if office in {"engineer", "engineering"} or company in {"civil_engineering", "engineering"}:
+        groups.add("Проєктні організації")
+    if office in {"property_developer", "developer"} or company in {"property_development", "developer"}:
+        groups.add("Забудовники")
+    if craft in {"builder", "roofer", "plasterer", "floorer", "carpenter", "stonemason"}:
         groups.add("Підрядники приватного будівництва")
+    if craft in {"builder", "roofer"}:
+        groups.add("Будівельні компанії")
+    if craft in {"interior_designer", "interior_design"}:
+        groups.add("Дизайнери інтер'єру")
+    if office in {"interior_design", "interior_designer"}:
+        groups.add("Дизайнери інтер'єру")
+    if office in {"landscape_architect", "landscape_design"}:
+        groups.add("Ландшафтні дизайнери")
+    if craft in {"landscape_gardener", "landscape_architect", "landscape_designer"}:
+        groups.add("Ландшафтні дизайнери")
+    if craft in {"window_construction", "door_construction", "floorer", "plasterer", "electrician"}:
+        groups.add("Монтажні організації")
+    if craft in {"metal_construction", "metalworking", "welder", "steelworker"}:
+        groups.add("Металоконструкції")
+    if office in {"fire_protection", "fire_safety"}:
+        groups.add("Протипожежні системи")
     return groups
 
 
@@ -141,8 +167,34 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             UNIQUE(company_id, phone)
         );
         CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+        CREATE TABLE IF NOT EXISTS website_checks (
+            website TEXT PRIMARY KEY, checked_at TEXT NOT NULL,
+            phone_count INTEGER NOT NULL DEFAULT 0
+        );
     """)
     return con
+
+
+def site_needs_check(con: sqlite3.Connection, website: str,
+                     now: dt.datetime | None = None) -> bool:
+    """Avoid repeated requests: recheck fruitful sites weekly, empty sites daily."""
+    item = con.execute("SELECT checked_at,phone_count FROM website_checks WHERE website=?",
+                       (website,)).fetchone()
+    if item is None:
+        return True
+    try:
+        last = dt.datetime.fromisoformat(item["checked_at"])
+        today = now or dt.datetime.now(dt.timezone.utc)
+        return today - last >= dt.timedelta(days=7 if item["phone_count"] else 1)
+    except (ValueError, TypeError):
+        return True
+
+
+def mark_site_checked(con: sqlite3.Connection, website: str, phone_count: int) -> None:
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    con.execute("""INSERT INTO website_checks(website,checked_at,phone_count) VALUES(?,?,?)
+                   ON CONFLICT(website) DO UPDATE SET checked_at=excluded.checked_at,
+                   phone_count=excluded.phone_count""", (website, now, phone_count))
 
 
 def save_contact(con: sqlite3.Connection, name: str, category: str, region: str,

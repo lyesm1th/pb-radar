@@ -12,11 +12,12 @@ import threading
 import time
 from pathlib import Path
 
-from .core import BASE_DIR, CATEGORIES, REGIONS, classify, normalize_url, parse_ua_phones
-from .discovery import RegionIndex, name_region
+from .core import BASE_DIR, CATEGORIES, REGIONS, classify
+from .discovery import (RegionIndex, address_region, extract_business_contacts,
+                        osm_business_name)
 
 INDEX_FILE = BASE_DIR / "cache" / "osm-index.sqlite3"
-INDEX_VERSION = "2"
+INDEX_VERSION = "3"
 PROGRESS_EVERY = 150_000
 
 
@@ -90,7 +91,7 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
 
     if index_is_current(osm_path, db_path):
         with sqlite3.connect(db_path) as con:
-            return con.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            return con.execute("SELECT COUNT(*) FROM leads WHERE phones != '[]' OR website != ''").fetchone()[0]
 
     if progress:
         progress("Готую точний лічильник OSM · один попередній швидкий прохід…")
@@ -112,7 +113,7 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
             CREATE TABLE leads(
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, region TEXT NOT NULL,
                 categories TEXT NOT NULL, website TEXT NOT NULL,
-                phones TEXT NOT NULL, source_url TEXT NOT NULL
+                social TEXT NOT NULL, phones TEXT NOT NULL, source_url TEXT NOT NULL
             );
             CREATE TABLE lead_categories(lead_id INTEGER NOT NULL, category TEXT NOT NULL);
         """)
@@ -122,6 +123,7 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
             found = 0
             relevant = 0
             no_contacts = 0
+            no_region = 0
             started = time.monotonic()
 
             def _tick(self):
@@ -142,62 +144,82 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                              f"залишилось {eta} · кандидатів {self.relevant:,} · "
                              f"із контактами {self.found:,}")
 
-            def _add(self, obj, region: str, tags: dict, groups: set[str]):
+            def _add(self, obj, region: str, tags: dict, groups: set[str], name: str):
                 if cancel is not None and cancel.is_set():
                     raise InterruptedError("Індексування зупинено")
-                phones = parse_ua_phones(tags.get("contact:phone", "") + " " + tags.get("phone", ""))
-                website = normalize_url(tags.get("contact:website") or tags.get("website") or "")
+                phones, website, social = extract_business_contacts(tags)
                 if not phones and not website:
                     self.no_contacts += 1
-                    return
+                else:
+                    self.found += 1
+                if region == "Не визначено":
+                    self.no_region += 1
                 osm_type = {"n": "node", "w": "way", "r": "relation"}.get(obj.type_str(), obj.type_str())
-                row = (tags["name"].strip(), region, ", ".join(sorted(groups)), website,
+                row = (name, region, ", ".join(sorted(groups)), website, social,
                        json.dumps(phones, ensure_ascii=False),
                        f"https://www.openstreetmap.org/{osm_type}/{obj.id}")
-                cur = con.execute("""INSERT INTO leads(name,region,categories,website,phones,source_url)
-                                     VALUES (?,?,?,?,?,?)""", row)
+                cur = con.execute("""INSERT INTO leads(name,region,categories,website,social,phones,source_url)
+                                     VALUES (?,?,?,?,?,?,?)""", row)
                 con.executemany("INSERT INTO lead_categories(lead_id,category) VALUES (?,?)",
                                 [(cur.lastrowid, group) for group in sorted(groups)])
-                self.found += 1
-                if self.found % 400 == 0:
+                if self.relevant % 400 == 0:
                     con.commit()
                     if progress:
-                        progress(f"Індекс України: {self.found:,} організацій з публічними контактами")
+                        progress(f"Індекс України: {self.relevant:,} кандидатів · {self.found:,} з контактом")
+
+            def _consider(self, obj, tags: dict, region: str):
+                name = osm_business_name(tags, obj.id)
+                if not name:
+                    return
+                groups = classify(name, tags)
+                if not groups:
+                    return
+                self.relevant += 1
+                self._add(obj, region, tags, groups, name)
 
             def node(self, node):
                 self._tick()
                 if not node.location.valid():
                     return
-                name = node.tags.get("name", "").strip()
-                if not name:
+                if not (node.tags.get("name") or node.tags.get("name:uk") or
+                        node.tags.get("name:en") or node.tags.get("name:ru") or node.tags.get("brand") or
+                        node.tags.get("operator") or node.tags.get("office") or
+                        node.tags.get("craft") or node.tags.get("company")):
                     return
-                tags = {key: node.tags.get(key, "") for key in
-                        ("name", "name:en", "description", "office", "craft", "contact:phone",
-                         "phone", "contact:website", "website")}
-                groups = classify(name, tags)
+                tags = dict(node.tags)
+                name = osm_business_name(tags, node.id)
+                groups = classify(name, tags) if name else set()
                 if groups:
                     self.relevant += 1
-                    self._add(node, regions.at(node.location.lon, node.location.lat), tags, groups)
+                    self._add(node, regions.at(node.location.lon, node.location.lat), tags, groups, name)
 
             def way(self, way):
                 self._tick()
-                name = way.tags.get("name", "").strip()
-                if not name:
+                if not way.tags:
                     return
                 tags = dict(way.tags)
-                groups = classify(name, tags)
-                if groups:
-                    self.relevant += 1
-                    region = name_region(tags.get("addr:region", "") or tags.get("addr:state", ""))
-                    self._add(way, region, tags, groups)
+                name = osm_business_name(tags, way.id)
+                if not name or not classify(name, tags):
+                    return
+                region = address_region(tags)
+                if region == "Не визначено":
+                    # The location index holds coordinates only in memory;
+                    # no second nationwide PBF or node-cache file is created.
+                    for ref in way.nodes:
+                        if ref.location.valid():
+                            region = regions.at(ref.location.lon, ref.location.lat)
+                            break
+                self._consider(way, tags, region)
 
-            def relation(self, _relation):
-                # Relations are counted in the progress denominator. They are
-                # not yet indexed as contacts in this version of the scanner.
+            def relation(self, relation):
                 self._tick()
+                if not relation.tags:
+                    return
+                tags = dict(relation.tags)
+                self._consider(relation, tags, address_region(tags))
 
         handler = Handler()
-        handler.apply_file(str(osm_path), locations=False)
+        handler.apply_file(str(osm_path), locations=True, idx="flex_mem")
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Індексування зупинено")
         if on_progress:
@@ -216,7 +238,8 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
                          ("total_objects", str(total)), ("node_count", str(nodes)),
                          ("way_count", str(ways)), ("relation_count", str(relations)),
                          ("relevant_candidates", str(handler.relevant)),
-                         ("without_public_contacts", str(handler.no_contacts))])
+                         ("without_public_contacts", str(handler.no_contacts)),
+                         ("unknown_region", str(handler.no_region))])
         con.commit()
         con.close()
         stage.replace(db_path)
@@ -233,20 +256,21 @@ def build_osm_index(osm_path: Path, regions: RegionIndex, progress=None,
 
 def find_indexed_leads(osm_path: Path, selected_categories: set[str],
                        selected_regions: set[str], db_path: Path = INDEX_FILE,
-                       limit: int = 1500) -> list[dict]:
+                       limit: int | None = None) -> list[dict]:
     """Fast region/category query, entirely local after a successful index build."""
     if not index_is_current(osm_path, db_path):
         raise RuntimeError("Індекс OSM відсутній або застарілий")
-    if not selected_categories or limit <= 0:
+    if not selected_categories or (limit is not None and limit <= 0):
         return []
     categories = sorted(selected_categories & set(CATEGORIES))
     if not categories:
         return []
     category_marks = ",".join("?" for _ in categories)
-    sql = ("SELECT DISTINCT leads.name,leads.region,leads.categories,leads.website,"
-           "leads.phones,leads.source_url FROM leads "
+    sql = ("SELECT DISTINCT leads.id,leads.name,leads.region,leads.categories,leads.website,"
+           "leads.social,leads.phones,leads.source_url FROM leads "
            "JOIN lead_categories cats ON cats.lead_id=leads.id "
-           f"WHERE cats.category IN ({category_marks})")
+           f"WHERE cats.category IN ({category_marks}) AND "
+           "(leads.phones != '[]' OR leads.website != '')")
     params: list = list(categories)
     if selected_regions:
         chosen = sorted(selected_regions & set(REGIONS))
@@ -254,10 +278,12 @@ def find_indexed_leads(osm_path: Path, selected_categories: set[str],
             return []
         sql += f" AND leads.region IN ({','.join('?' for _ in chosen)})"
         params.extend(chosen)
-    sql += " ORDER BY RANDOM() LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY leads.id"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
     with sqlite3.connect(db_path) as con:
         rows = con.execute(sql, params).fetchall()
-    return [{"name": row[0], "region": row[1], "category": row[2],
-             "website": row[3], "phones": json.loads(row[4]), "source_url": row[5]}
+    return [{"name": row[1], "region": row[2], "category": row[3],
+             "website": row[4], "social": row[5], "phones": json.loads(row[6]), "source_url": row[7]}
             for row in rows]

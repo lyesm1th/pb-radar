@@ -40,6 +40,77 @@ class OfflineBoundariesTests(unittest.TestCase):
 
 
 class IndexTests(unittest.TestCase):
+    def test_extended_index_reads_ways_relations_and_nonstandard_contacts(self):
+        sample = '''<osm version="0.6" generator="tests">
+          <node id="11" lat="49.84" lon="24.03" version="1"/>
+          <node id="12" lat="49.85" lon="24.04" version="1"/>
+          <node id="13" lat="49.84" lon="24.03" version="1">
+            <tag k="office" v="architect"/>
+            <tag k="contact:mobile" v="+380671234567"/>
+          </node>
+          <node id="14" lat="50.45" lon="30.52" version="1">
+            <tag k="name" v="Проєктне бюро без контактів"/>
+            <tag k="office" v="engineer"/>
+          </node>
+          <way id="15" version="1">
+            <nd ref="11"/><nd ref="12"/>
+            <tag k="name" v="Ремонтні роботи"/>
+            <tag k="craft" v="window_construction"/>
+            <tag k="phone" v="0501234567"/>
+            <tag k="contact:instagram" v="@remont"/>
+          </way>
+          <relation id="16" version="1">
+            <member type="way" ref="15" role=""/>
+            <tag k="name" v="Інжиніринг Плюс"/>
+            <tag k="office" v="engineer"/>
+            <tag k="addr:city" v="Львів"/>
+            <tag k="contact:website" v="example.org"/>
+          </relation>
+        </osm>'''
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "sample.osm"
+            db = Path(folder) / "index.sqlite3"
+            source.write_text(sample, encoding="utf-8")
+            self.assertEqual(build_osm_index(source, RegionIndex(ensure_regions()), db_path=db), 3)
+            architecture = find_indexed_leads(source, {"Архітектори"}, {"Львівська"}, db)
+            self.assertEqual(len(architecture), 1)
+            self.assertIn("+380671234567", architecture[0]["phones"])
+            self.assertTrue(architecture[0]["name"].startswith("Без назви"))
+            installer = find_indexed_leads(source, {"Монтажні організації"}, {"Львівська"}, db)
+            self.assertEqual(len(installer), 1)
+            self.assertEqual(installer[0]["social"], "https://instagram.com/remont")
+            engineering = find_indexed_leads(source, {"Проєктні організації"}, {"Львівська"}, db)
+            self.assertEqual(len(engineering), 1)
+            self.assertEqual(engineering[0]["website"], "https://example.org")
+            self.assertTrue(engineering[0]["source_url"].endswith("relation/16"))
+            import sqlite3
+            with sqlite3.connect(db) as con:
+                meta = dict(con.execute("SELECT key, value FROM meta"))
+                self.assertEqual(meta["relevant_candidates"], "4")
+                self.assertEqual(meta["without_public_contacts"], "1")
+                self.assertEqual(con.execute("SELECT COUNT(*) FROM leads").fetchone()[0], 4)
+            self.assertEqual(build_osm_index(source, RegionIndex(ensure_regions()), db_path=db), 3)
+
+    def test_index_queries_not_capped_at_1500(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "sample.osm"
+            db = Path(folder) / "index.sqlite3"
+            source.write_text(OSM_SAMPLE, encoding="utf-8")
+            build_osm_index(source, RegionIndex(ensure_regions()), db_path=db)
+            with sqlite3.connect(db) as con:
+                for n in range(1600):
+                    cur = con.execute("""INSERT INTO leads(name,region,categories,website,social,phones,source_url)
+                                         VALUES(?,?,?,?,?,?,?)""", (
+                        f"Компанія {n}", "Львівська", "Архітектори", "", "",
+                        '["+380671234567"]', f"https://www.openstreetmap.org/node/{n + 100}"))
+                    con.execute("INSERT INTO lead_categories(lead_id,category) VALUES (?,?)",
+                                (cur.lastrowid, "Архітектори"))
+            all_leads = find_indexed_leads(source, {"Архітектори"}, {"Львівська"}, db)
+            self.assertEqual(len(all_leads), 1601)
+            self.assertEqual(len(find_indexed_leads(source, {"Архітектори"}, {"Львівська"}, db,
+                                                    limit=100)), 100)
+
     def test_exact_total_counts_nodes_ways_and_relations(self):
         sample = OSM_SAMPLE.replace("</osm>", '''<way id="3" version="1">
           <nd ref="1"/><nd ref="2"/>

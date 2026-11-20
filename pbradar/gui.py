@@ -16,8 +16,8 @@ from PIL import Image, ImageTk
 
 from . import __version__
 from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES,
-                   company_key, connect_db, export_csv, parse_ua_phones, read_contacts,
-                   save_contact, set_phone_status)
+                   connect_db, export_csv, mark_site_checked, parse_ua_phones,
+                   read_contacts, save_contact, set_phone_status, site_needs_check)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
@@ -332,43 +332,36 @@ class App(ctk.CTk):
             leads = find_indexed_leads(source, categories, set() if all_regions else regions)
             reader = WebsiteReader()
             checked_websites: dict[str, tuple[dict[str, str], str]] = {}
-            found, new_count = 0, 0
+            found, new_count, sites_scanned = 0, 0, 0
             with connect_db() as con:
-                already_checked = {
-                    row[0]: row[1] for row in con.execute(
-                        "SELECT company_key, checked_at FROM companies WHERE checked_at != ''")
-                }
                 for pos, lead in enumerate(leads, 1):
                     if self.cancel.is_set():
                         raise InterruptedError()
                     numbers = {num: lead["source_url"] for num in lead["phones"]}
                     activity = "Невідомо"
-                    key = company_key(lead["name"], lead["website"], lead["region"])
-                    last_check = already_checked.get(key, "")
-                    recently_processed = False
-                    if last_check:
-                        try:
-                            recently_processed = (dt.datetime.now(dt.timezone.utc) -
-                                                  dt.datetime.fromisoformat(last_check)).days < 7
-                        except ValueError:
-                            pass
-                    if lead["website"] and not recently_processed and len(checked_websites) < 120:
+                    if lead["website"] and (lead["website"] in checked_websites or
+                                            site_needs_check(con, lead["website"])):
                         website = lead["website"]
                         if website not in checked_websites:
                             checked_websites[website] = read_site_numbers(website, reader)
+                            sites_scanned += 1
+                            mark_site_checked(con, website, len(checked_websites[website][0]))
                         site_phones, activity = checked_websites[website]
                         numbers.update(site_phones)
                     for number, source_url in numbers.items():
                         new_count += save_contact(con, lead["name"], lead["category"],
                                                   lead["region"], number, lead["website"],
-                                                  source_url, activity)
+                                                  source_url, activity,
+                                                  social=lead.get("social", ""))
                         found += 1
                     if pos % 10 == 0:
                         con.commit()
                         self.ui_event("refresh", None)
-                        self.ui_event("message", f"Перевірено {pos}/{len(leads)} компаній · телефонів: {found} · нових: {new_count}")
+                        self.ui_event("message", f"Перевірено {pos}/{len(leads)} компаній · "
+                                      f"сайтів: {sites_scanned} · телефонів: {found} · нових: {new_count}")
             self.ui_event("refresh", None)
-            return f"Готово: перевірено {len(leads)} організацій, додано {new_count} нових телефонів."
+            return (f"Готово: перевірено {len(leads)} організацій і {sites_scanned} сайтів, "
+                    f"додано {new_count} нових телефонів.")
 
         self.run_task(work)
 
