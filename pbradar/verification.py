@@ -87,7 +87,7 @@ def call_result(status: str) -> str:
     return "Не перевірено дзвінком"
 
 def judge(row: dict, evidence: SiteEvidence | None, distinct_codes: int = 0) -> dict[str, str]:
-    url = official_site(row.get("website") or "")
+    url = official_site(row.get("website") or "") or official_site(row.get("source_url") or "")
     data = dict(verification="Немає власного сайту", verified_owner="Не встановлено",
                 company_state="ЄДР не перевірено", evidence_url=row.get("source_url") or "",
                 verified_website=url)
@@ -138,7 +138,8 @@ def verify_saved(*, ids: set[int] | None = None,
         for index, row in enumerate(records, 1):
             if cancel and cancel.is_set():
                 raise InterruptedError()
-            website = official_site(row.get("website") or "")
+            website = (official_site(row.get("website") or "") or
+                       official_site(row.get("source_url") or ""))
             previous = row.get("verified_at")
             recent = False
             if previous and website == (row.get("verified_website") or ""):

@@ -395,7 +395,7 @@ class App(ctk.CTk):
             f"Телефон: {row.get('phone', '')}\n"
             f"Звірка: {row.get('verification', 'Не перевірено')}\n"
             f"Кому приписаний: {row.get('verified_owner', 'Не встановлено')}\n"
-            f"Компанія: {row.get('company_state', 'Не перевірено')}\n"
+            f"Стан компанії: {row.get('company_state', 'Не перевірено')}\n"
             f"Лінія: {row.get('line_state', 'Не перевірено дзвінком')}\n"
             f"Перевірено: {row.get('verified_at', 'Немає')}\n"
             f"Підтвердження: {row.get('evidence_url', '')}\n\n"
@@ -415,6 +415,14 @@ class App(ctk.CTk):
                     f"на власних сайтах підтверджено {r['confirmed']}. "
                     "Доступність лінії підтверджує тільки дзвінок.")
         self.run_task(work)
+
+    def verify_after_source(self):
+        """Run resumable validation after every collection channel."""
+        self.ui_event("message", "Звіряю телефони з власними сайтами фірм…")
+        r = verify_saved(cancel=self.cancel,
+            progress=lambda s: self.ui_event("message", s),
+            refresh=lambda: self.ui_event("refresh", None))
+        return f"Звірено {r['checked']:,}; на сайтах підтверджено {r['confirmed']:,}. "
 
     def save_resized_columns(self, _event=None):
         if self._dragging_separator:
@@ -698,12 +706,9 @@ class App(ctk.CTk):
                     lun_text = f" ЛУН: {lun['profiles']} профілів, нових {lun['new']}."
                 except RuntimeError as exc:
                     lun_text = f" ЛУН тимчасово недоступний: {exc}."
-            self.ui_event("message", "Звіряю знайдені контакти з власними сайтами компаній…")
-            checked = verify_saved(cancel=self.cancel,
-                progress=lambda s: self.ui_event("message", s),
-                refresh=lambda: self.ui_event("refresh", None))
-            return (f"Звірено {checked['checked']:,}; підтверджено {checked['confirmed']:,}. "
-                    + f"Каталоги: сторінок {found['pages']:,}, контактних записів "
+            verification_summary = self.verify_after_source()
+            return (verification_summary
+                    + f"Каталоги: сторінок {found['pages']:,}, контактних записів 
                     f"{found['listed']:,}, нових унікальних номерів {found['new']:,}. "
                     + lun_text + " "
                     + f"Недоступних розділів: {found['unavailable']:,}; помилок: {found['failed']:,}. "
@@ -723,7 +728,9 @@ class App(ctk.CTk):
             result = scan_lun(regions, cancel=self.cancel,
                               progress=lambda s: self.ui_event("message", s),
                               refresh=lambda: self.ui_event("refresh", None))
-            return (f"ЛУН: перевірено {result['profiles']:,} профілів із {result['total']:,}, "
+            verification_summary = self.verify_after_source()
+            return (verification_summary
+                    + f"ЛУН: перевірено {result['profiles']:,} профілів із {result['total']:,}, 
                     f"профілів із телефонами {result['with_phone']:,}, "
                     f"нових унікальних номерів {result['new']:,}; "
                     f"залишилось {result['remaining']:,}. Результат збережено.")
@@ -781,7 +788,9 @@ class App(ctk.CTk):
                         self.ui_event("message", f"Перевірено {pos}/{len(leads)} компаній · "
                                       f"сайтів: {sites_scanned} · телефонів: {found} · нових: {new_count}")
             self.ui_event("refresh", None)
-            return (f"Готово: перевірено {len(leads)} організацій і {sites_scanned} сайтів, "
+            verification_summary = self.verify_after_source()
+            return (verification_summary
+                    + f"Готово: перевірено {len(leads)} організацій і {sites_scanned} сайтів, 
                     f"додано {new_count} нових телефонів.")
 
         self.run_task(work)
@@ -821,7 +830,9 @@ class App(ctk.CTk):
                 cancel=self.cancel, resume=resume,
                 progress=lambda s: self.ui_event("message", s),
                 refresh=lambda: self.ui_event("refresh", None))
-            return (f"Prozorro: переглянуто {result['examined']:,} закупівель, "
+            verification_summary = self.verify_after_source()
+            return (verification_summary
+                    + f"Prozorro: переглянуто {result['examined']:,} закупівель, 
                     f"контактів {result['leads']:,}, нових номерів {result['new']:,}.")
 
         self.run_task(work)

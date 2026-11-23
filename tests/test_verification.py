@@ -33,6 +33,13 @@ class VerificationTests(unittest.TestCase):
                      "https://prozorro.gov.ua/tender/123"):
             self.assertEqual(verify.official_site(site), "")
 
+    def test_source_url_can_be_its_own_company_site(self):
+        row = {"name": "ТОВ Лев Девелопмент", "phone": "+380671234567",
+               "website": "", "source_url": "https://firm.test/contacts", "edrpou": ""}
+        evidence = verify.SiteEvidence(True, {"+380671234567": "https://firm.test/contacts"},
+                                       heading="Лев Девелопмент")
+        self.assertEqual(verify.judge(row, evidence)["verification"], "Є на сайті фірми")
+
     def test_database_keeps_manager_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             dbfile = Path(tmp) / "contacts.db"
