@@ -251,6 +251,14 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
             verified_website TEXT NOT NULL DEFAULT '',
             verified_at TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS work_items (
+            phone TEXT PRIMARY KEY,
+            in_work INTEGER NOT NULL DEFAULT 0,
+            selected_at TEXT NOT NULL DEFAULT '',
+            result_note TEXT NOT NULL DEFAULT '',
+            last_contact_date TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
     """)
     # Upgrade pre-0.4.1 databases in place, keeping all manager statuses.
     columns = {row["name"] for row in con.execute("PRAGMA table_info(companies)")}
@@ -278,6 +286,15 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
     con.execute("""INSERT OR IGNORE INTO company_regions(company_id,region)
                    SELECT p.id,p.region FROM companies p WHERE NOT EXISTS
                    (SELECT 1 FROM company_regions cr WHERE cr.company_id=p.id)""")
+    # One-time upgrade: the legacy checkbox was represented by any reviewed
+    # status. Never re-select these contacts on subsequent application opens.
+    if not con.execute("SELECT 1 FROM app_settings WHERE key='work_queue_backfilled'").fetchone():
+        con.execute("""INSERT OR IGNORE INTO work_items(phone,in_work,selected_at,updated_at)
+                       SELECT DISTINCT phone,1,MIN(checked_at),MAX(checked_at)
+                       FROM contacts WHERE status != 'Не опрацьований'
+                       GROUP BY phone""")
+        con.execute("""INSERT INTO app_settings(key,value)
+                       VALUES('work_queue_backfilled','1')""")
     return con
 
 
@@ -413,6 +430,52 @@ def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
     return cursor.rowcount
 
 
+
+def set_work_selected(con: sqlite3.Connection, phone: str, selected: bool) -> None:
+    """Move an existing phone to/from the work queue without changing its status."""
+    if not con.execute("SELECT 1 FROM contacts WHERE phone=? LIMIT 1", (phone,)).fetchone():
+        raise ValueError("Номер відсутній у базі")
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    con.execute("""
+        INSERT INTO work_items(phone,in_work,selected_at,updated_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(phone) DO UPDATE SET
+            in_work=excluded.in_work,
+            selected_at=CASE WHEN excluded.in_work=1 AND work_items.in_work=0
+                             THEN excluded.selected_at ELSE work_items.selected_at END,
+            updated_at=excluded.updated_at
+    """, (phone, int(selected), now if selected else "", now))
+
+
+def save_work_result(con: sqlite3.Connection, phone: str, status: str,
+                     result_note: str, last_contact_date: str = "") -> None:
+    """Save the manager's report; a note never implies a completed phone call."""
+    if status not in CONTACT_STATUSES:
+        raise ValueError("Невідомий статус контакту")
+    if len(result_note) > 12000:
+        raise ValueError("Результат контакту занадто довгий")
+    if last_contact_date:
+        try:
+            parsed = dt.date.fromisoformat(last_contact_date)
+        except ValueError as exc:
+            raise ValueError("Дата має бути у форматі РРРР-ММ-ДД") from exc
+        if parsed > dt.datetime.now(dt.timezone.utc).date():
+            raise ValueError("Дата останнього контакту не може бути в майбутньому")
+    item = con.execute("SELECT in_work FROM work_items WHERE phone=?", (phone,)).fetchone()
+    if not item or not item["in_work"]:
+        raise ValueError("Контакт не перебуває в роботі")
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    set_phone_status(con, phone, status)
+    con.execute("""UPDATE work_items SET result_note=?,last_contact_date=?,updated_at=?
+                   WHERE phone=?""", (result_note.strip(), last_contact_date, now, phone))
+
+
+def read_work_contacts(con: sqlite3.Connection) -> list[dict]:
+    """One visible representative of each selected phone, regardless of main filters."""
+    rows = [row for row in read_contacts(con) if row.get("in_work")]
+    return sorted(rows, key=lambda row: (row["work_updated_at"], row["phone"]), reverse=True)
+
+
 def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
                   *, include_prozorro: bool = True,
                   categories: set[str] | None = None,
@@ -449,9 +512,14 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
                     COALESCE(v.verified_owner,'') AS verified_owner,
                     COALESCE(v.company_state,'ЄДР не перевірено') AS company_state,
                     COALESCE(v.evidence_url,'') AS evidence_url,
-                    COALESCE(v.verified_at,'') AS verified_at
+                    COALESCE(v.verified_at,'') AS verified_at,
+                    COALESCE(w.in_work,0) AS in_work,
+                    COALESCE(w.result_note,'') AS contact_result,
+                    COALESCE(w.last_contact_date,'') AS last_contact_date,
+                    COALESCE(w.updated_at,'') AS work_updated_at
              FROM contacts c JOIN companies p ON p.id=c.company_id
              LEFT JOIN contact_verifications v ON v.contact_id=c.id
+             LEFT JOIN work_items w ON w.phone=c.phone
              WHERE c.id IN (
                  SELECT id FROM (
                      SELECT c2.id, ROW_NUMBER() OVER (
@@ -481,6 +549,7 @@ SEARCH_FIELDS = (
     "name", "category", "region", "phone", "role", "status", "website",
     "social", "source_url", "source_label", "checked_at", "activity", "ownership", "edrpou",
     "verification", "verified_owner", "company_state", "line_state", "verified_at",
+    "contact_result", "last_contact_date",
 )
 
 
@@ -524,7 +593,8 @@ def copyable_contact_value(row: dict, column: str) -> str:
 def export_csv(path: Path, rows: list[dict]) -> None:
     headings = ("name", "category", "region", "phone", "role", "status", "ownership", "edrpou",
                 "website", "social", "source_url", "source_label", "checked_at", "activity",
-                "verification", "verified_owner", "company_state", "line_state", "evidence_url", "verified_at")
+                "verification", "verified_owner", "company_state", "line_state", "evidence_url",
+                "verified_at", "in_work", "contact_result", "last_contact_date")
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headings, extrasaction="ignore", delimiter=";")
         writer.writeheader()

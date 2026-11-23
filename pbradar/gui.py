@@ -25,7 +25,7 @@ from .core import (BASE_DIR, CATEGORIES, REGIONS, CONTACT_STATUSES, OWNERSHIP_FI
                    group_contacts_by_company, mark_site_checked, parse_ua_phones,
                    read_column_widths, read_contacts,
                    read_setting, save_contact, set_company_ownership, set_phone_status,
-                   site_needs_check, visible_link, write_setting)
+                   set_work_selected, site_needs_check, visible_link, write_setting)
 from .discovery import (RegionIndex, WebsiteReader, download_ukraine_osm,
                         ensure_regions, read_site_numbers)
 from .lun import scan_lun
@@ -90,6 +90,7 @@ class App(ctk.CTk):
         self.cancel = threading.Event()
         self.working = False
         self.rows: dict[str, dict] = {}
+        self.work_window = None
         self.expanded_groups: set[str] = set()
         self.list_categories: set[str] | None = None
         self.list_regions: set[str] | None = None
@@ -179,6 +180,8 @@ class App(ctk.CTk):
                                         "#24528a", height=31)
         self.source_btn = self.button(sources, "Власний PBF", self.choose_source,
                                       PANEL_RAISED, height=31)
+        self.work_btn = self.button(sources, "▣  У роботі · 0", self.open_work_queue,
+                                    "#24528a", width=150, height=31)
         self.verify_btn = self.button(sources, "✓ Звірити видимі", self.start_verification,
                                       "#24528a", width=140, height=31)
         self.export_btn = self.button(sources, "Експорт CSV", self.export, PANEL_RAISED,
@@ -382,6 +385,15 @@ class App(ctk.CTk):
             url = visible_link(self.rows[selected[0]])
             if url:
                 webbrowser.open(url)
+
+    def open_work_queue(self):
+        from .work_queue import WorkQueueWindow
+        if self.work_window is not None and self.work_window.winfo_exists():
+            self.work_window.lift()
+            self.work_window.focus()
+            self.work_window.refresh()
+            return
+        self.work_window = WorkQueueWindow(self, on_change=self.refresh)
 
     def show_verification_details(self):
         selected = self.table.selection()
@@ -858,6 +870,17 @@ class App(ctk.CTk):
             region_rows = (category_rows if self.list_regions is None else
                            read_contacts(con, include_prozorro=self.show_prozorro.get(),
                                          categories=self.list_categories, regions=self.list_regions))
+        work_count = sum(bool(row["in_work"]) for row in all_rows)
+        self.work_btn.configure(text=f"▣  У роботі · {work_count}")
+        if self.work_window is not None and self.work_window.winfo_exists():
+            if not self.work_window.dirty:
+                self.work_window.refresh()
+        # Contacts moved into work have their own window, independent of
+        # search-region, source and status filters in the main radar.
+        all_rows = [row for row in all_rows if not row["in_work"]]
+        source_rows = [row for row in source_rows if not row["in_work"]]
+        category_rows = [row for row in category_rows if not row["in_work"]]
+        region_rows = [row for row in region_rows if not row["in_work"]]
         excluded_source = len(all_rows) - len(source_rows)
         excluded_category = len(source_rows) - len(category_rows)
         excluded_region = len(category_rows) - len(region_rows)
@@ -914,8 +937,8 @@ class App(ctk.CTk):
         for label, (_, background) in SOURCE_STYLES.items():
             self.table.tag_configure("source:" + label, background=background)
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
-        self.count_text.set(f"Показано: {len(groups)} фірм / {len(values)} номерів із {len(all_rows)}  ·  "
-                            f"Нові у базі: {len(all_rows) - reviewed}  ·  Опрацьовані: {reviewed}")
+        self.count_text.set(f"Пошук: {len(groups)} фірм / {len(values)} номерів із {len(all_rows)}  ·  "
+                            f"У роботі: {work_count}  ·  Опрацьовані поза роботою: {reviewed}")
         hidden = len(all_rows) - len(values)
         if hidden:
             reasons = [("джерело", excluded_source), ("напрямки", excluded_category),
@@ -931,7 +954,7 @@ class App(ctk.CTk):
 
     @staticmethod
     def contact_values(row):
-        return (("☑" if row["status"] != "Не опрацьований" else "☐",
+        return (("☑" if row.get("in_work") else "☐",
                  "● " + str(row.get("source_label") or source_label(row.get("source_url", "")))) + tuple(
             row.get(k, "") for k in
             ("name", "category", "region", "ownership", "edrpou", "phone",
@@ -959,11 +982,10 @@ class App(ctk.CTk):
         row = self.rows[row_id]
         if row.get("is_group"):
             return
-        new_status = "Опрацьовано" if row["status"] == "Не опрацьований" else "Не опрацьований"
         with connect_db() as con:
-            set_phone_status(con, row["phone"], new_status)
+            set_work_selected(con, row["phone"], True)
         self.refresh()
-        self.status_text.set(f"{row['phone']} → {new_status}")
+        self.status_text.set(f"{row['phone']} → у вікні «Контакти в роботі».")
         return "break"
 
     def change_status(self, _event=None):
