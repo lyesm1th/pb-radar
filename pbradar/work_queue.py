@@ -234,9 +234,12 @@ class WorkQueueWindow(ctk.CTkToplevel):
             messagebox.showerror("Не збережено", str(exc), parent=self)
             return False
         self.dirty = False
-        self.on_change()
         if reload:
+            self.on_change()
             self.refresh()
+        else:
+            # Switching rows must finish before the main window repaints us.
+            self.after_idle(self.on_change)
         return True
 
     def copy_phone(self):

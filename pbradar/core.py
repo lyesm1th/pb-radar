@@ -254,6 +254,7 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS work_items (
             phone TEXT PRIMARY KEY,
             in_work INTEGER NOT NULL DEFAULT 0,
+            company_id INTEGER NOT NULL DEFAULT 0,
             selected_at TEXT NOT NULL DEFAULT '',
             result_note TEXT NOT NULL DEFAULT '',
             last_contact_date TEXT NOT NULL DEFAULT '',
@@ -286,15 +287,23 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
     con.execute("""INSERT OR IGNORE INTO company_regions(company_id,region)
                    SELECT p.id,p.region FROM companies p WHERE NOT EXISTS
                    (SELECT 1 FROM company_regions cr WHERE cr.company_id=p.id)""")
+    # Seamless upgrade for users who installed the earlier work-list build.
+    work_columns = {item["name"] for item in con.execute("PRAGMA table_info(work_items)")}
+    if "company_id" not in work_columns:
+        con.execute("ALTER TABLE work_items ADD COLUMN company_id INTEGER NOT NULL DEFAULT 0")
     # One-time upgrade: the legacy checkbox was represented by any reviewed
     # status. Never re-select these contacts on subsequent application opens.
     if not con.execute("SELECT 1 FROM app_settings WHERE key='work_queue_backfilled'").fetchone():
-        con.execute("""INSERT OR IGNORE INTO work_items(phone,in_work,selected_at,updated_at)
-                       SELECT DISTINCT phone,1,MIN(checked_at),MAX(checked_at)
+        con.execute("""INSERT OR IGNORE INTO work_items(phone,in_work,company_id,selected_at,updated_at)
+                       SELECT phone,1,company_id,MIN(checked_at),MAX(checked_at)
                        FROM contacts WHERE status != 'Не опрацьований'
                        GROUP BY phone""")
         con.execute("""INSERT INTO app_settings(key,value)
                        VALUES('work_queue_backfilled','1')""")
+    con.execute("""UPDATE work_items SET company_id=COALESCE(
+                       (SELECT c.company_id FROM contacts c
+                        WHERE c.phone=work_items.phone ORDER BY c.id LIMIT 1), 0)
+                   WHERE company_id=0""")
     return con
 
 
@@ -431,20 +440,28 @@ def set_phone_status(con: sqlite3.Connection, phone: str, status: str) -> int:
 
 
 
-def set_work_selected(con: sqlite3.Connection, phone: str, selected: bool) -> None:
+def set_work_selected(con: sqlite3.Connection, phone: str, selected: bool,
+                      company_id: int = 0) -> None:
     """Move an existing phone to/from the work queue without changing its status."""
-    if not con.execute("SELECT 1 FROM contacts WHERE phone=? LIMIT 1", (phone,)).fetchone():
+    exists = con.execute("SELECT 1 FROM contacts WHERE phone=? LIMIT 1", (phone,)).fetchone()
+    if not exists:
         raise ValueError("Номер відсутній у базі")
+    if company_id and not con.execute(
+            "SELECT 1 FROM contacts WHERE phone=? AND company_id=? LIMIT 1",
+            (phone, company_id)).fetchone():
+        raise ValueError("Номер не належить вибраній картці організації")
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     con.execute("""
-        INSERT INTO work_items(phone,in_work,selected_at,updated_at)
-        VALUES (?,?,?,?)
+        INSERT INTO work_items(phone,in_work,company_id,selected_at,updated_at)
+        VALUES (?,?,?,?,?)
         ON CONFLICT(phone) DO UPDATE SET
             in_work=excluded.in_work,
+            company_id=CASE WHEN excluded.in_work=1 AND excluded.company_id>0
+                            THEN excluded.company_id ELSE work_items.company_id END,
             selected_at=CASE WHEN excluded.in_work=1 AND work_items.in_work=0
                              THEN excluded.selected_at ELSE work_items.selected_at END,
             updated_at=excluded.updated_at
-    """, (phone, int(selected), now if selected else "", now))
+    """, (phone, int(selected), company_id, now if selected else "", now))
 
 
 def save_work_result(con: sqlite3.Connection, phone: str, status: str,
@@ -524,12 +541,14 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
                  SELECT id FROM (
                      SELECT c2.id, ROW_NUMBER() OVER (
                          PARTITION BY c2.phone ORDER BY
+                         CASE WHEN COALESCE(w2.company_id,0)=p2.id THEN 0 ELSE 1 END,
                          CASE WHEN c2.status='Не опрацьований' THEN 1 ELSE 0 END,
                          CASE WHEN p2.ownership='Державна / комунальна' THEN 1 ELSE 0 END,
                          CASE WHEN LOWER(c2.source_url) LIKE '%prozorro.gov.ua%' THEN 1 ELSE 0 END,
                          c2.id
                      ) AS row_rank FROM contacts c2
                      JOIN companies p2 ON p2.id=c2.company_id
+                     LEFT JOIN work_items w2 ON w2.phone=c2.phone
                      WHERE """ + filter_sql + """
                  ) WHERE row_rank = 1
              )"""

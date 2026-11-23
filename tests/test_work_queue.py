@@ -59,6 +59,19 @@ class WorkQueueTests(unittest.TestCase):
                 self.assertEqual({r["status"] for r in con.execute(
                     "SELECT status FROM contacts")}, {"Зателефонували"})
 
+    def test_keeps_chosen_company_for_duplicate_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with connect_db(Path(tmp) / "db.sqlite3") as con:
+                phone = "+380671234567"
+                save_contact(con, "ТОВ Перша", "Архітектори", "Київська", phone)
+                save_contact(con, "ТОВ Друга", "Будівельні компанії", "Львівська", phone)
+                chosen = con.execute(
+                    "SELECT id FROM companies WHERE name='ТОВ Друга'").fetchone()[0]
+                set_work_selected(con, phone, True, chosen)
+                self.assertEqual(read_work_contacts(con)[0]["name"], "ТОВ Друга")
+                with self.assertRaises(ValueError):
+                    set_work_selected(con, phone, True, 999999)
+
     def test_legacy_checked_contacts_backfill_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "db.sqlite3"

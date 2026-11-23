@@ -983,7 +983,7 @@ class App(ctk.CTk):
         if row.get("is_group"):
             return
         with connect_db() as con:
-            set_work_selected(con, row["phone"], True)
+            set_work_selected(con, row["phone"], True, row["company_id"])
         self.refresh()
         self.status_text.set(f"{row['phone']} → у вікні «Контакти в роботі».")
         return "break"
