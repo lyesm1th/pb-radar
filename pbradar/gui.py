@@ -708,7 +708,7 @@ class App(ctk.CTk):
                     lun_text = f" ЛУН тимчасово недоступний: {exc}."
             verification_summary = self.verify_after_source()
             return (verification_summary
-                    + f"Каталоги: сторінок {found['pages']:,}, контактних записів 
+                    + f"Каталоги: сторінок {found['pages']:,}, контактних записів "
                     f"{found['listed']:,}, нових унікальних номерів {found['new']:,}. "
                     + lun_text + " "
                     + f"Недоступних розділів: {found['unavailable']:,}; помилок: {found['failed']:,}. "
@@ -730,7 +730,7 @@ class App(ctk.CTk):
                               refresh=lambda: self.ui_event("refresh", None))
             verification_summary = self.verify_after_source()
             return (verification_summary
-                    + f"ЛУН: перевірено {result['profiles']:,} профілів із {result['total']:,}, 
+                    + f"ЛУН: перевірено {result['profiles']:,} профілів із {result['total']:,}, "
                     f"профілів із телефонами {result['with_phone']:,}, "
                     f"нових унікальних номерів {result['new']:,}; "
                     f"залишилось {result['remaining']:,}. Результат збережено.")
@@ -790,7 +790,7 @@ class App(ctk.CTk):
             self.ui_event("refresh", None)
             verification_summary = self.verify_after_source()
             return (verification_summary
-                    + f"Готово: перевірено {len(leads)} організацій і {sites_scanned} сайтів, 
+                    + f"Готово: перевірено {len(leads)} організацій і {sites_scanned} сайтів, "
                     f"додано {new_count} нових телефонів.")
 
         self.run_task(work)
@@ -832,7 +832,7 @@ class App(ctk.CTk):
                 refresh=lambda: self.ui_event("refresh", None))
             verification_summary = self.verify_after_source()
             return (verification_summary
-                    + f"Prozorro: переглянуто {result['examined']:,} закупівель, 
+                    + f"Prozorro: переглянуто {result['examined']:,} закупівель, "
                     f"контактів {result['leads']:,}, нових номерів {result['new']:,}.")
 
         self.run_task(work)
