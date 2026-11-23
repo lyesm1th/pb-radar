@@ -476,7 +476,7 @@ def save_work_result(con: sqlite3.Connection, phone: str, status: str,
             parsed = dt.date.fromisoformat(last_contact_date)
         except ValueError as exc:
             raise ValueError("Дата має бути у форматі РРРР-ММ-ДД") from exc
-        if parsed > dt.datetime.now(dt.timezone.utc).date():
+        if parsed > dt.datetime.now().astimezone().date():
             raise ValueError("Дата останнього контакту не може бути в майбутньому")
     item = con.execute("SELECT in_work FROM work_items WHERE phone=?", (phone,)).fetchone()
     if not item or not item["in_work"]:
@@ -485,6 +485,31 @@ def save_work_result(con: sqlite3.Connection, phone: str, status: str,
     set_phone_status(con, phone, status)
     con.execute("""UPDATE work_items SET result_note=?,last_contact_date=?,updated_at=?
                    WHERE phone=?""", (result_note.strip(), last_contact_date, now, phone))
+
+
+WORK_SORT_KEYS = frozenset((
+    "name", "phone", "status", "last_contact_date", "contact_result", "source_label",
+))
+
+
+def sort_work_contacts(rows: list[dict], field: str = "last_contact_date",
+                       descending: bool = True) -> list[dict]:
+    """Sort contact cards; blank dates/results always stay last.
+
+    ISO YYYY-MM-DD strings sort chronologically, and text is case-insensitive.
+    Stable secondary key keeps rows in a predictable order after refresh.
+    """
+    if field not in WORK_SORT_KEYS:
+        raise ValueError("Невідоме поле сортування")
+    populated = [row for row in rows if str(row.get(field) or "").strip()]
+    empty = [row for row in rows if not str(row.get(field) or "").strip()]
+    return (sorted(populated,
+                   key=lambda row: (str(row.get(field) or "").casefold(),
+                                    str(row.get("name") or "").casefold(),
+                                    str(row.get("phone") or "")),
+                   reverse=descending)
+            + sorted(empty, key=lambda row: (str(row.get("name") or "").casefold(),
+                                             str(row.get("phone") or ""))))
 
 
 def read_work_contacts(con: sqlite3.Connection) -> list[dict]:

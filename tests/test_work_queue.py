@@ -98,5 +98,47 @@ class WorkQueueTests(unittest.TestCase):
                 self.assertEqual(row["contact_result"], "")
 
 
+    def test_sort_by_date_newest_and_oldest_with_unknown_last(self):
+        from pbradar.core import sort_work_contacts
+        rows = [
+            {"name": "A", "phone": "1", "last_contact_date": "2026-11-04"},
+            {"name": "B", "phone": "2", "last_contact_date": ""},
+            {"name": "C", "phone": "3", "last_contact_date": "2026-11-23"},
+            {"name": "D", "phone": "4", "last_contact_date": "2026-11-10"},
+        ]
+        self.assertEqual([r["phone"] for r in sort_work_contacts(rows)],
+                         ["3", "4", "1", "2"])
+        self.assertEqual([r["phone"] for r in sort_work_contacts(rows, descending=False)],
+                         ["1", "4", "3", "2"])
+
+    def test_sort_by_result_and_status_case_insensitive(self):
+        from pbradar.core import sort_work_contacts
+        rows = [
+            {"name": "A", "phone": "1", "contact_result": "Зателефонувати",
+             "status": "Опрацьовано"},
+            {"name": "B", "phone": "2", "contact_result": "",
+             "status": "Не відповідає"},
+            {"name": "C", "phone": "3", "contact_result": "відмовив",
+             "status": "Потенційний партнер"},
+        ]
+        sorted_result = sort_work_contacts(rows, "contact_result", False)
+        self.assertEqual([r["phone"] for r in sorted_result], ["3", "1", "2"])
+        sorted_desc = sort_work_contacts(rows, "contact_result", True)
+        self.assertEqual([r["phone"] for r in sorted_desc], ["1", "3", "2"])
+        self.assertEqual([r["phone"] for r in sort_work_contacts(rows, "status", False)],
+                         ["2", "1", "3"])
+        with self.assertRaises(ValueError):
+            sort_work_contacts(rows, "sql injection", False)
+
+    def test_manager_can_save_contact_date_manually(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with connect_db(Path(tmp) / "db.sqlite3") as con:
+                phone = "+380671234567"
+                save_contact(con, "ТОВ Будова", "Забудовники", "Львівська", phone)
+                set_work_selected(con, phone, True)
+                save_work_result(con, phone, "Зателефонували", "Контакт встановлено",
+                                 "2026-11-22")
+                self.assertEqual(read_work_contacts(con)[0]["last_contact_date"], "2026-11-22")
+
 if __name__ == "__main__":
     unittest.main()
