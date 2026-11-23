@@ -32,6 +32,7 @@ from .lun import scan_lun
 from .osm_index import build_osm_index, find_indexed_leads, index_is_current, INDEX_FILE
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 from .prozorro import read_cursor, scan_prozorro
+from .sources import SOURCE_STYLES, group_source_label, source_label
 
 STATUSES = CONTACT_STATUSES
 BG = "#090f1c"
@@ -263,10 +264,10 @@ class App(ctk.CTk):
         self.button(explanation_line, "↻ Оновити список", self.update_list_filters,
                     "#24528a", width=135, height=27, side="right")
 
-        cols = ("mark", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
-        headers = ("✓", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
+        cols = ("mark", "source", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
+        headers = ("✓", "Джерело", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
-        widths = (45, 200, 160, 125, 165, 100, 150, 145, 150, 145, 155, 190)
+        widths = (45, 130, 200, 160, 125, 165, 100, 150, 145, 150, 145, 155, 190)
         self.default_column_widths = dict(zip(cols, widths))
         table_box = tk.Frame(panel, bg=PANEL, highlightthickness=0)
         table_box.pack(fill="both", expand=True, padx=12)
@@ -285,7 +286,7 @@ class App(ctk.CTk):
         hor.pack(side="bottom", fill="x")
         self.table.pack(fill="both", expand=True)
         self._dragging_separator = False
-        self._focused_column = "#7"  # Phone column until the user selects another cell.
+        self._focused_column = "#8"  # Phone column until the user selects another cell.
         self.table.bind("<ButtonPress-1>", self.note_column_drag)
         self.table.bind("<ButtonRelease-1>", self.toggle_from_click)
         self.table.bind("<ButtonRelease-1>", self.save_resized_columns, add="+")
@@ -302,8 +303,13 @@ class App(ctk.CTk):
         self.copy_menu.add_command(label="Копіювати комірку (Ctrl+C)", command=self.copy_selected_cell)
         self.copy_menu.add_separator()
         self.copy_menu.add_command(label="Відкрити посилання", command=self.open_contact_link)
-        ctk.CTkLabel(panel, text="▶ Номери фірми  ·  Подвійний клік: копіювати телефон / посилання  ·  ПКМ: меню  ·  Ctrl+C: копіювати комірку",
-                     text_color=MUTED, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(5, 9))
+        legend = ctk.CTkFrame(panel, fg_color="transparent")
+        legend.pack(fill="x", padx=16, pady=(5, 8))
+        ctk.CTkLabel(legend, text="Джерела:", text_color=MUTED,
+                     font=(FONT, 10)).pack(side="left", padx=(0, 9))
+        for label in ("ЛУН", "List.in.ua", "NOVOBUDOVY", "Prozorro", "OSM", "Сайт", "Без джерела"):
+            ctk.CTkLabel(legend, text="● " + label, text_color=SOURCE_STYLES[label][0],
+                         font=(FONT, 10)).pack(side="left", padx=(0, 13))
         self.layout.bind("<ButtonRelease-1>", lambda _event: self.after(80, self.save_pane_ratios))
         self.after(250, self.restore_layout)
 
@@ -814,37 +820,42 @@ class App(ctk.CTk):
         for position, entries in enumerate(groups):
             row = entries[0]
             tag = "even" if position % 2 == 0 else "odd"
+            group_label = group_source_label(entries)
+            source_tag = "source:" + group_label
             if len(entries) == 1:
                 id_ = "contact:" + str(row["id"])
                 self.rows[id_] = row
-                self.table.insert("", "end", iid=id_, values=self.contact_values(row), tags=(tag,))
+                self.table.insert("", "end", iid=id_, values=self.contact_values(row),
+                                  tags=(tag, source_tag))
                 continue
             group_id = ("group:edr:" + row["edrpou"]) if row.get("edrpou") else (
                 "group:company:" + str(row["company_id"]))
-            self.rows[group_id] = {**row, "is_group": True}
+            self.rows[group_id] = {**row, "is_group": True, "source_label": group_label}
             reviewed_in_group = sum(item["status"] != "Не опрацьований" for item in entries)
             label = f"{len(entries)} номери · {reviewed_in_group} опрацьовано"
             regions_in_group = list(dict.fromkeys(item["region"] for item in entries))
             region_label = regions_in_group[0] if len(regions_in_group) == 1 else f"{len(regions_in_group)} області"
             self.table.insert("", "end", iid=group_id, open=group_id in self.expanded_groups,
-                              values=("", row["name"], row["category"], region_label,
+                              values=("", "● " + group_label, row["name"], row["category"], region_label,
                                       row["ownership"], row.get("edrpou", ""), label, "", row["activity"], "", "",
                                       visible_link(row)),
-                              tags=(tag, "group"))
+                              tags=(tag, "group", source_tag))
             for item in entries:
                 child_id = "contact:" + str(item["id"])
                 self.rows[child_id] = item
                 child_values = list(self.contact_values(item))
-                child_values[1] = ""
-                child_values[2] = ""
-                child_values[4] = ""
-                child_values[5] = ""
+                child_values[2] = ""  # Name on parent
+                child_values[3] = ""  # Category on parent
+                child_values[5] = ""  # Ownership on parent
+                child_values[6] = ""  # Registration ID on parent
                 self.table.insert(group_id, "end", iid=child_id, values=child_values,
-                                  tags=("child",))
+                                  tags=("child", "source:" + str(item.get("source_label") or source_label(item.get("source_url", "")))))
         self.table.tag_configure("even", background=PANEL)
         self.table.tag_configure("odd", background="#17253a")
         self.table.tag_configure("group", foreground="#f3f7fe")
         self.table.tag_configure("child", background="#0e1a2b", foreground="#b7c9e1")
+        for label, (_, background) in SOURCE_STYLES.items():
+            self.table.tag_configure("source:" + label, background=background)
         reviewed = sum(row["status"] != "Не опрацьований" for row in all_rows)
         self.count_text.set(f"Показано: {len(groups)} фірм / {len(values)} номерів із {len(all_rows)}  ·  "
                             f"Нові у базі: {len(all_rows) - reviewed}  ·  Опрацьовані: {reviewed}")
@@ -863,7 +874,8 @@ class App(ctk.CTk):
 
     @staticmethod
     def contact_values(row):
-        return (("☑" if row["status"] != "Не опрацьований" else "☐",) + tuple(
+        return (("☑" if row["status"] != "Не опрацьований" else "☐",
+                 "● " + str(row.get("source_label") or source_label(row.get("source_url", "")))) + tuple(
             row.get(k, "") for k in
             ("name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status")) +
             (visible_link(row),))
@@ -914,7 +926,7 @@ class App(ctk.CTk):
         if selected:
             row = self.rows.get(selected[0], {})
             if row.get("is_group"):
-                if event and self.table.identify_column(event.x) == "#12":
+                if event and self.table.identify_column(event.x) == "#13":
                     self.copy_contact_field("website")
                     return
                 if event and self.table.identify_region(event.x, event.y) == "tree":
@@ -928,10 +940,10 @@ class App(ctk.CTk):
                 return
             if event and self.table.identify_column(event.x) == "#1":
                 return
-            if event and self.table.identify_column(event.x) == "#7":
+            if event and self.table.identify_column(event.x) == "#8":
                 self.copy_contact_field("phone")
                 return
-            if event and self.table.identify_column(event.x) == "#12":
+            if event and self.table.identify_column(event.x) == "#13":
                 self.copy_contact_field("website")
                 return
             self.open_contact_link()

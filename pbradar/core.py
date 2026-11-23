@@ -11,6 +11,8 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .sources import source_label
+
 import phonenumbers
 
 BASE_DIR = Path(os.getenv("LOCALAPPDATA") or (Path.home() / ".local" / "share")) / "PB-Radar"
@@ -452,12 +454,15 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
         sql += " AND c.status IN (" + ",".join("?" for _ in statuses) + ")"
         args.extend(statuses)
     sql += " ORDER BY c.checked_at DESC, p.name"
-    return [dict(row) for row in con.execute(sql, args)]
+    records = [dict(row) for row in con.execute(sql, args)]
+    for record in records:
+        record["source_label"] = source_label(record.get("source_url", ""))
+    return records
 
 
 SEARCH_FIELDS = (
     "name", "category", "region", "phone", "role", "status", "website",
-    "social", "source_url", "checked_at", "activity", "ownership", "edrpou",
+    "social", "source_url", "source_label", "checked_at", "activity", "ownership", "edrpou",
 )
 
 
@@ -500,7 +505,7 @@ def copyable_contact_value(row: dict, column: str) -> str:
 
 def export_csv(path: Path, rows: list[dict]) -> None:
     headings = ("name", "category", "region", "phone", "role", "status", "ownership", "edrpou",
-                "website", "social", "source_url", "checked_at", "activity")
+                "website", "social", "source_url", "source_label", "checked_at", "activity")
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headings, extrasaction="ignore", delimiter=";")
         writer.writeheader()
