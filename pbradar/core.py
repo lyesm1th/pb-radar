@@ -242,6 +242,15 @@ def connect_db(path: Path = DB_PATH) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS contact_verifications (
+            contact_id INTEGER PRIMARY KEY REFERENCES contacts(id),
+            verification TEXT NOT NULL DEFAULT 'Не перевірено',
+            verified_owner TEXT NOT NULL DEFAULT '',
+            company_state TEXT NOT NULL DEFAULT 'ЄДР не перевірено',
+            evidence_url TEXT NOT NULL DEFAULT '',
+            verified_website TEXT NOT NULL DEFAULT '',
+            verified_at TEXT NOT NULL DEFAULT ''
+        );
     """)
     # Upgrade pre-0.4.1 databases in place, keeping all manager statuses.
     columns = {row["name"] for row in con.execute("PRAGMA table_info(companies)")}
@@ -435,8 +444,14 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
                     COALESCE((SELECT GROUP_CONCAT(cr.region, ', ') FROM company_regions cr
                               WHERE cr.company_id=p.id), p.region) AS region, c.phone,
                     c.role, c.status, p.website, p.social, c.source_url, c.checked_at,
-                    p.activity, p.ownership, p.edrpou
+                    p.activity, p.ownership, p.edrpou,
+                    COALESCE(v.verification,'Не перевірено') AS verification,
+                    COALESCE(v.verified_owner,'') AS verified_owner,
+                    COALESCE(v.company_state,'ЄДР не перевірено') AS company_state,
+                    COALESCE(v.evidence_url,'') AS evidence_url,
+                    COALESCE(v.verified_at,'') AS verified_at
              FROM contacts c JOIN companies p ON p.id=c.company_id
+             LEFT JOIN contact_verifications v ON v.contact_id=c.id
              WHERE c.id IN (
                  SELECT id FROM (
                      SELECT c2.id, ROW_NUMBER() OVER (
@@ -457,12 +472,15 @@ def read_contacts(con: sqlite3.Connection, statuses: tuple[str, ...] = (),
     records = [dict(row) for row in con.execute(sql, args)]
     for record in records:
         record["source_label"] = source_label(record.get("source_url", ""))
+        from .verification import call_result
+        record["line_state"] = call_result(record.get("status") or "")
     return records
 
 
 SEARCH_FIELDS = (
     "name", "category", "region", "phone", "role", "status", "website",
     "social", "source_url", "source_label", "checked_at", "activity", "ownership", "edrpou",
+    "verification", "verified_owner", "company_state", "line_state", "verified_at",
 )
 
 
@@ -505,7 +523,8 @@ def copyable_contact_value(row: dict, column: str) -> str:
 
 def export_csv(path: Path, rows: list[dict]) -> None:
     headings = ("name", "category", "region", "phone", "role", "status", "ownership", "edrpou",
-                "website", "social", "source_url", "source_label", "checked_at", "activity")
+                "website", "social", "source_url", "source_label", "checked_at", "activity",
+                "verification", "verified_owner", "company_state", "line_state", "evidence_url", "verified_at")
     with path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headings, extrasaction="ignore", delimiter=";")
         writer.writeheader()

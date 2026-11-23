@@ -33,6 +33,7 @@ from .osm_index import build_osm_index, find_indexed_leads, index_is_current, IN
 from .osm_storage import OSM_FILE, cleanup_abandoned_download, inspect_osm
 from .prozorro import read_cursor, scan_prozorro
 from .sources import SOURCE_STYLES, group_source_label, source_label
+from .verification import verify_saved
 
 STATUSES = CONTACT_STATUSES
 BG = "#090f1c"
@@ -178,6 +179,8 @@ class App(ctk.CTk):
                                         "#24528a", height=31)
         self.source_btn = self.button(sources, "Власний PBF", self.choose_source,
                                       PANEL_RAISED, height=31)
+        self.verify_btn = self.button(sources, "✓ Звірити видимі", self.start_verification,
+                                      "#24528a", width=140, height=31)
         self.export_btn = self.button(sources, "Експорт CSV", self.export, PANEL_RAISED,
                                       height=31, side="right")
         self.import_btn = self.button(sources, "Імпорт CSV", self.import_contacts, PANEL_RAISED,
@@ -264,10 +267,10 @@ class App(ctk.CTk):
         self.button(explanation_line, "↻ Оновити список", self.update_list_filters,
                     "#24528a", width=135, height=27, side="right")
 
-        cols = ("mark", "source", "name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status", "website")
-        headers = ("✓", "Джерело", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Призначення",
+        cols = ("mark", "source", "name", "category", "region", "ownership", "edrpou", "phone", "verification", "verified_owner", "line_state", "role", "activity", "checked_at", "status", "website")
+        headers = ("✓", "Джерело", "Компанія", "Категорія", "Область", "Тип організації", "ЄДРПОУ", "Телефон", "Звірка", "Кому приписаний", "Стан лінії", "Призначення",
                    "Активність", "Перевірено", "Статус", "Сайт / посилання")
-        widths = (45, 130, 200, 160, 125, 165, 100, 150, 145, 150, 145, 155, 190)
+        widths = (45, 130, 200, 160, 125, 165, 100, 150, 175, 190, 170, 145, 150, 145, 155, 190)
         self.default_column_widths = dict(zip(cols, widths))
         table_box = tk.Frame(panel, bg=PANEL, highlightthickness=0)
         table_box.pack(fill="both", expand=True, padx=12)
@@ -303,6 +306,7 @@ class App(ctk.CTk):
         self.copy_menu.add_command(label="Копіювати комірку (Ctrl+C)", command=self.copy_selected_cell)
         self.copy_menu.add_separator()
         self.copy_menu.add_command(label="Відкрити посилання", command=self.open_contact_link)
+        self.copy_menu.add_command(label="Деталі звірки", command=self.show_verification_details)
         legend = ctk.CTkFrame(panel, fg_color="transparent")
         legend.pack(fill="x", padx=16, pady=(5, 8))
         ctk.CTkLabel(legend, text="Джерела:", text_color=MUTED,
@@ -378,6 +382,39 @@ class App(ctk.CTk):
             url = visible_link(self.rows[selected[0]])
             if url:
                 webbrowser.open(url)
+
+    def show_verification_details(self):
+        selected = self.table.selection()
+        if not selected or selected[0] not in self.rows:
+            return
+        row = self.rows[selected[0]]
+        if row.get("is_group"):
+            return
+        messagebox.showinfo("PB Radar · звірка",
+            f"Компанія: {row.get('name', '')}\n"
+            f"Телефон: {row.get('phone', '')}\n"
+            f"Звірка: {row.get('verification', 'Не перевірено')}\n"
+            f"Кому приписаний: {row.get('verified_owner', 'Не встановлено')}\n"
+            f"Компанія: {row.get('company_state', 'Не перевірено')}\n"
+            f"Лінія: {row.get('line_state', 'Не перевірено дзвінком')}\n"
+            f"Перевірено: {row.get('verified_at', 'Немає')}\n"
+            f"Підтвердження: {row.get('evidence_url', '')}\n\n"
+            "Публікація на сайті не доводить чинність номера або юридичну активність фірми.")
+
+    def start_verification(self):
+        ids = {int(row["id"]) for row in self.rows.values() if not row.get("is_group")}
+        if not ids:
+            messagebox.showinfo("Звірка", "Немає видимих контактів.")
+            return
+        def work():
+            r = verify_saved(ids=ids, cancel=self.cancel,
+                progress=lambda s: self.ui_event("message", s),
+                refresh=lambda: self.ui_event("refresh", None))
+            self.ui_event("refresh", None)
+            return (f"Звірено {r['checked']} з {r['total']}; "
+                    f"на власних сайтах підтверджено {r['confirmed']}. "
+                    "Доступність лінії підтверджує тільки дзвінок.")
+        self.run_task(work)
 
     def save_resized_columns(self, _event=None):
         if self._dragging_separator:
@@ -559,6 +596,7 @@ class App(ctk.CTk):
                     self.osm_search_btn.configure(state="normal")
                     self.lun_btn.configure(state="normal")
                     self.prozorro_btn.configure(state="normal")
+                    self.verify_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
                     self.progress.stop()
@@ -571,6 +609,7 @@ class App(ctk.CTk):
                     self.osm_search_btn.configure(state="normal")
                     self.lun_btn.configure(state="normal")
                     self.prozorro_btn.configure(state="normal")
+                    self.verify_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     self.source_btn.configure(state="normal")
                     self.progress.stop()
@@ -591,6 +630,7 @@ class App(ctk.CTk):
         self.osm_search_btn.configure(state="disabled")
         self.lun_btn.configure(state="disabled")
         self.prozorro_btn.configure(state="disabled")
+        self.verify_btn.configure(state="disabled")
         self.download_btn.configure(state="disabled")
         self.source_btn.configure(state="disabled")
         self.progress.configure(mode="indeterminate")
@@ -658,7 +698,12 @@ class App(ctk.CTk):
                     lun_text = f" ЛУН: {lun['profiles']} профілів, нових {lun['new']}."
                 except RuntimeError as exc:
                     lun_text = f" ЛУН тимчасово недоступний: {exc}."
-            return (f"Каталоги: сторінок {found['pages']:,}, контактних записів "
+            self.ui_event("message", "Звіряю знайдені контакти з власними сайтами компаній…")
+            checked = verify_saved(cancel=self.cancel,
+                progress=lambda s: self.ui_event("message", s),
+                refresh=lambda: self.ui_event("refresh", None))
+            return (f"Звірено {checked['checked']:,}; підтверджено {checked['confirmed']:,}. "
+                    + f"Каталоги: сторінок {found['pages']:,}, контактних записів "
                     f"{found['listed']:,}, нових унікальних номерів {found['new']:,}. "
                     + lun_text + " "
                     + f"Недоступних розділів: {found['unavailable']:,}; помилок: {found['failed']:,}. "
@@ -837,8 +882,9 @@ class App(ctk.CTk):
             region_label = regions_in_group[0] if len(regions_in_group) == 1 else f"{len(regions_in_group)} області"
             self.table.insert("", "end", iid=group_id, open=group_id in self.expanded_groups,
                               values=("", "● " + group_label, row["name"], row["category"], region_label,
-                                      row["ownership"], row.get("edrpou", ""), label, "", row["activity"], "", "",
-                                      visible_link(row)),
+                                      row["ownership"], row.get("edrpou", ""), label,
+                                      f"Звірено {sum(bool(x.get('verified_at')) for x in entries)}/{len(entries)}",
+                                      "", "", "", row["activity"], "", "", visible_link(row)),
                               tags=(tag, "group", source_tag))
             for item in entries:
                 child_id = "contact:" + str(item["id"])
@@ -877,7 +923,8 @@ class App(ctk.CTk):
         return (("☑" if row["status"] != "Не опрацьований" else "☐",
                  "● " + str(row.get("source_label") or source_label(row.get("source_url", "")))) + tuple(
             row.get(k, "") for k in
-            ("name", "category", "region", "ownership", "edrpou", "phone", "role", "activity", "checked_at", "status")) +
+            ("name", "category", "region", "ownership", "edrpou", "phone",
+             "verification", "verified_owner", "line_state", "role", "activity", "checked_at", "status")) +
             (visible_link(row),))
 
     def sync_status(self, _event=None):
@@ -926,7 +973,7 @@ class App(ctk.CTk):
         if selected:
             row = self.rows.get(selected[0], {})
             if row.get("is_group"):
-                if event and self.table.identify_column(event.x) == "#13":
+                if event and self.table.identify_column(event.x) == "#16":
                     self.copy_contact_field("website")
                     return
                 if event and self.table.identify_region(event.x, event.y) == "tree":
@@ -943,7 +990,7 @@ class App(ctk.CTk):
             if event and self.table.identify_column(event.x) == "#8":
                 self.copy_contact_field("phone")
                 return
-            if event and self.table.identify_column(event.x) == "#13":
+            if event and self.table.identify_column(event.x) == "#16":
                 self.copy_contact_field("website")
                 return
             self.open_contact_link()
